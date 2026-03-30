@@ -1,0 +1,40 @@
+#pragma once
+#include <string_view>
+<<<<<<< HEAD
+#include <securecnet/util/util.h>
+=======
+#include <util/util.h>
+>>>>>>> origin/main
+
+namespace scn {
+
+    enum class Errc : U32 {
+        Ok = 0,
+        InvalidArg,
+        SocketError,
+        ResolveError,
+        WouldBlock,
+        Truncated,
+        BadPacket,
+        Internal,
+		EndOfStream,
+    };
+
+    struct Result {
+        Errc code{ Errc::Ok };
+        std::string_view msg{};
+
+        constexpr bool ok() const { 
+            return code == Errc::Ok;
+        }
+
+        static constexpr Result success() {
+            return {}; 
+        }
+
+        static constexpr Result fail(Errc c, std::string_view m = {}) {
+            return { c, m };
+        }
+    };
+
+} 

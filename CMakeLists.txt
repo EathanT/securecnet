@@ -10,18 +10,12 @@ if (POLICY CMP0141)
 endif()
 
 
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
 project(SECURECNET LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-<<<<<<< HEAD
-=======
 
->>>>>>> origin/main
+
 option(SECURECNET_BUILD_DEMO "Build demo" ON)
 option(SECURECNET_BUILD_TESTS "Build tests" ON)
 

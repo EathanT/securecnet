@@ -12,10 +12,6 @@ static int expect(bool cond, const char* msg) {
     return 0;
 }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
 int test_bytebuf() {
 
     U8 buf[64]{};

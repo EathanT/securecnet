@@ -1,10 +1,6 @@
 #pragma once
 #include "securecnet/platform.hpp"
-<<<<<<< HEAD
 #include "securecnet/util/util.h"
-=======
-#include "util/util.h"
->>>>>>> origin/main
 #include <string>
 
 namespace scn {
@@ -17,4 +13,4 @@ namespace scn {
         U16 port() const;
     };
 
-} 
+}

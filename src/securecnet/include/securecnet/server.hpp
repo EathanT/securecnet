@@ -1,14 +1,10 @@
 #pragma once
-<<<<<<< HEAD
 #include "securecnet/io_context.hpp"
 #include "securecnet/message.hpp"
-=======
->>>>>>> origin/main
 #include "securecnet/result.hpp"
 #include "securecnet/udp_socket.hpp"
 #include "securecnet/packet.hpp"
 #include "securecnet/socket_init.hpp"
-<<<<<<< HEAD
 #include <array>
 #include <deque>
 #include <functional>
@@ -46,7 +42,6 @@ namespace scn {
         using OnPacketFn = std::function<void(const Endpoint& from, const PacketView&)>;
         using OnMessageFn = std::function<void(Peer peer, const MsgView&)>;
 
-
         Server() = default;
         explicit Server(IoContext& ctx);
         ~Server();
@@ -57,26 +52,14 @@ namespace scn {
         Result start(const Endpoint& bind_ep) {
             return listen(bind_ep);
         }
+
         Result listen(const Endpoint& bind_ep);
         Result listen(std::string_view port);
         Result listen(U16 port);
-=======
-#include <functional>
-#include <cstdint>
-
-namespace scn {
-
-    class Server {
-    public:
-        using OnPacketFn = std::function<void(const Endpoint& from, const PacketView&)>;
-
-        Result start(const Endpoint& bind_ep);
->>>>>>> origin/main
         void stop();
 
         Result tick();
 
-<<<<<<< HEAD
         Result send_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len);
         Result send_payload(const Peer& peer, const U8* data, ST len);
         Result send_payload(const Peer& peer, std::span<const U8> payload);
@@ -105,29 +88,13 @@ namespace scn {
 
         IoContext* _ctx{ nullptr };
         SocketInit _runtime{};
-=======
-        Result send_payload(const Endpoint& to, U64 conn_id,
-            const U8* data, ST len);
-
-        void on_packet(OnPacketFn fn) { _on_packet = std::move(fn); }
-
-    private:
-        SocketInit _wsa{};
->>>>>>> origin/main
         UdpSocket _sock{};
         U64 _seq{ 1 };
 
         OnPacketFn _on_packet{};
-<<<<<<< HEAD
         OnMessageFn _on_message{};
         U8 _rxbuf[NetConfig::MaxPacketBytes]{};
         std::deque<PendingPacket> _pending{};
     };
 
 }
-=======
-        U8 _rxbuf[NetConfig::MaxPacketBytes]{};
-    };
-
-}
->>>>>>> origin/main

@@ -42,8 +42,4 @@ namespace scn {
         Result skip(ST n);
     };
 
-<<<<<<< HEAD
-}
-=======
 } // namespace scn
->>>>>>> origin/main

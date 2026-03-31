@@ -1,10 +1,6 @@
 #pragma once
 #include <string_view>
-<<<<<<< HEAD
-#include <securecnet/util/util.h>
-=======
-#include <util/util.h>
->>>>>>> origin/main
+#include "securecnet/util/util.h"
 
 namespace scn {
 
@@ -17,19 +13,19 @@ namespace scn {
         Truncated,
         BadPacket,
         Internal,
-		EndOfStream,
+        EndOfStream,
     };
 
     struct Result {
         Errc code{ Errc::Ok };
         std::string_view msg{};
 
-        constexpr bool ok() const { 
+        constexpr bool ok() const {
             return code == Errc::Ok;
         }
 
         static constexpr Result success() {
-            return {}; 
+            return {};
         }
 
         static constexpr Result fail(Errc c, std::string_view m = {}) {
@@ -37,4 +33,4 @@ namespace scn {
         }
     };
 
-} 
+}

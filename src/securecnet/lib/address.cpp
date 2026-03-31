@@ -1,11 +1,8 @@
 #include "securecnet/address.hpp"
 #include "securecnet/platform.hpp"
 #include <cstring>
-<<<<<<< HEAD
 #include <string>
 
-=======
->>>>>>> origin/main
 
 namespace scn {
 
@@ -17,7 +14,6 @@ namespace scn {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_DGRAM;
-<<<<<<< HEAD
         hints.ai_protocol = IPPROTO_UDP;
         hints.ai_flags = passive ? AI_PASSIVE : 0;
 
@@ -36,17 +32,13 @@ namespace scn {
         }
 
         // getaddrinfo expects null-terminated C strings
-=======
         hints.ai_flags = passive ? AI_PASSIVE : 0;
 
-        // getaddrinfo expects null terminated C strings
->>>>>>> origin/main
         std::string host_s;
         const char* node = nullptr;
         if (!host.empty()) {
             host_s.assign(host.begin(), host.end());
             node = host_s.c_str();
-<<<<<<< HEAD
         }
 
         addrinfo* res = nullptr;
@@ -62,27 +54,14 @@ namespace scn {
         if (!res) {
             return Result::fail(Errc::ResolveError, "getaddrinfo returned null");
         }
-=======
             
-        }
         
-        std::string port_s(port.begin(), port.end());
         
-        addrinfo * res = nullptr;
-        const int rc = getaddrinfo(node, port_s.c_str(), &hints, &res);
-
-        if (rc != 0 || !res)
-            return Result::fail(Errc::ResolveError, "getaddrinfo failed");
->>>>>>> origin/main
 
         for (addrinfo* p = res; p; p = p->ai_next) {
             Endpoint ep{};
             std::memcpy(&ep.addr, p->ai_addr, p->ai_addrlen);
-<<<<<<< HEAD
             ep.len = static_cast<socklen_t>(p->ai_addrlen);
-=======
-            ep.len = (socklen_t)p->ai_addrlen;
->>>>>>> origin/main
             out.push_back(ep);
         }
 

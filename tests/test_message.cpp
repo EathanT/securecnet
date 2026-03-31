@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
-using namespace scn; 
+using namespace scn;
 
 static int expect(bool cond, const char* msg) {
     if (!cond) {
@@ -13,10 +13,6 @@ static int expect(bool cond, const char* msg) {
     return 0;
 }
 
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
 int test_message() {
 
     U8 payload[128]{};

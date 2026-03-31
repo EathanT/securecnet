@@ -5,7 +5,6 @@
 
 using namespace scn;
 
-
 static int expect(bool cond, const char* msg) {
     if (!cond) {
         std::printf("  %s\n", msg);
@@ -16,10 +15,6 @@ static int expect(bool cond, const char* msg) {
 
 static constexpr ST kHeaderBytes = 28; // our header is always 28 bytes
 
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/main
 int test_packet()
 {
 

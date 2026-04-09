@@ -3,6 +3,7 @@
 #include "securecnet/address.hpp"
 #include "securecnet/bytebuf.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -75,6 +76,11 @@ namespace scn {
         }
     }
 
+    U64 Server::now_ms() {
+        return static_cast<U64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
     Result Server::runtime_status() const {
         return _ctx ? _ctx->runtime_status() : _runtime.status();
     }
@@ -104,6 +110,7 @@ namespace scn {
 
         _seq = 1;
         _pending.clear();
+        _peers.clear();
         return Result::success(); 
     }
 
@@ -128,7 +135,17 @@ namespace scn {
 
     void Server::stop() {
         _pending.clear();
+        _peers.clear();
         _sock.close();
+    }
+
+    Server::PeerTransportState& Server::ensure_peer_state(const Endpoint& from, U64 conn_id) {
+        auto& state = _peers[from.to_string()];
+        state.endpoint = from;
+        if (conn_id != 0) {
+            state.conn_id = conn_id;
+        }
+        return state;
     }
 
     Result Server::queue_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len) {
@@ -152,63 +169,169 @@ namespace scn {
         return flush_pending();
     }
 
-
-    Result Server::send_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len) {
-        return queue_payload(to, conn_id, data, len);
-    }
-
-    Result Server::send_payload(const Peer& peer, const U8* data, ST len) {
-        const U64 conn_id = (peer.conn_id() != 0) ? peer.conn_id() : 1;
-        return queue_payload(peer.endpoint(), conn_id, data, len);
-    }
-
-    Result Server::send_payload(const Peer& peer, std::span<const U8> payload) {
-        return send_payload(peer, payload.data(), payload.size());
-    }
-
-    Result Server::send_message(const Peer& peer, Channel channel, U8 type, const void* data, U16 len) {
-        std::array<U8, NetConfig::MaxPacketBytes> payload{};
+    Result Server::queue_message_frame(const Endpoint& to, U64 conn_id, Channel channel, U8 type, const void* data, U16 len) {
+        std::array<U8, NetConfig::MaxPayloadBytes> payload{};
         ByteWriter writer{ payload.data(), payload.size() };
         auto rc = write_message(writer, channel, type, data, len);
         if (!rc.ok()) {
             return rc;
         }
 
-        return send_payload(peer, payload.data(), writer.off);
+        return queue_payload(to, conn_id, payload.data(), writer.off);
     }
 
-    Result Server::send(const Peer& peer, Channel channel, U8 type, std::span<const U8> payload) {
-        if (payload.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
-            return Result::fail(Errc::InvalidArg, "message payload too large");
+    Result Server::queue_control_ack(const Endpoint& to, U64 conn_id, U64 message_id) {
+        U8 ack_buf[sizeof(U64)]{};
+        ByteWriter writer{ ack_buf, sizeof(ack_buf) };
+        auto rc = write_reliable_ack(writer, message_id);
+        if (!rc.ok()) {
+            return rc;
         }
 
-        return send_message(peer, channel, type, payload.data(), static_cast<U16>(payload.size())); 
+        return queue_message_frame(to, conn_id, Channel::Control,
+                                   static_cast<U8>(ControlType::ReliableAck),
+                                   ack_buf, static_cast<U16>(writer.off));
     }
 
-    Result Server::send_text(const Peer& peer, U8 type, std::string_view text) {
-        if (text.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
-            return Result::fail(Errc::InvalidArg, "text payload too large");
-        }
-
-        return send_message(peer, Channel::Unreliable, type, text.data(), static_cast<U16>(text.size()));
+Result Server::send_reliable_message(PeerTransportState& state, U8 type, const void* data, U16 len) {
+    PendingReliableMessage pending{};
+    auto rc = state.reliable.enqueue(type, data, len, pending);
+    if (!rc.ok()) {
+        return rc;
     }
 
-    Result Server::flush_pending() {
-        while (!_pending.empty()) {
-            const PendingPacket& pending = _pending.front();
-            auto rc = _sock.send_to(pending.to, pending.bytes.data(), pending.len);
-            if (!rc.ok()) {
-                if (rc.code == Errc::WouldBlock) {
-                    return Result::success();
-                }
-                return rc;
+    const U64 conn_id = (state.conn_id != 0) ? state.conn_id : 1;
+    rc = queue_message_frame(state.endpoint, conn_id, Channel::Reliable, type,
+        pending.encoded_payload.data(), static_cast<U16>(pending.encoded_payload.size()));
+
+    if (!rc.ok()) {
+        state.reliable.acknowledge(pending.message_id);
+        return rc;
+    }
+
+    state.reliable.note_sent(pending.message_id, now_ms());
+    return Result::success();
+}
+
+Result Server::send_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len) {
+    return queue_payload(to, conn_id, data, len);
+}
+
+Result Server::send_payload(const Peer& peer, const U8* data, ST len) {
+    const U64 conn_id = (peer.conn_id() != 0) ? peer.conn_id() : 1;
+    return queue_payload(peer.endpoint(), conn_id, data, len);
+}
+
+Result Server::send_payload(const Peer& peer, std::span<const U8> payload) {
+    return send_payload(peer, payload.data(), payload.size());
+}
+
+Result Server::send_message(const Peer& peer, Channel channel, U8 type, const void* data, U16 len) {
+    auto& state = ensure_peer_state(peer.endpoint(), peer.conn_id());
+    if (channel == Channel::Reliable) {
+        return send_reliable_message(state, type, data, len);
+    }
+
+    const U64 conn_id = (state.conn_id != 0) ? state.conn_id : 1;
+    return queue_message_frame(state.endpoint, conn_id, channel, type, data, len);
+}
+
+Result Server::send(const Peer& peer, Channel channel, U8 type, std::span<const U8> payload) {
+    if (payload.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
+        return Result::fail(Errc::InvalidArg, "message payload too large");
+    }
+
+    return send_message(peer, channel, type, payload.data(), static_cast<U16>(payload.size()));
+}
+
+Result Server::send_text(const Peer& peer, U8 type, std::string_view text) {
+    if (text.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
+        return Result::fail(Errc::InvalidArg, "text payload too large");
+    }
+
+    return send_message(peer, Channel::Unreliable, type, text.data(), static_cast<U16>(text.size()));
+}
+
+Result Server::flush_pending() {
+    while (!_pending.empty()) {
+        const PendingPacket& pending = _pending.front();
+        auto rc = _sock.send_to(pending.to, pending.bytes.data(), pending.len);
+        if (!rc.ok()) {
+            if (rc.code == Errc::WouldBlock) {
+                return Result::success();
             }
-
-            _pending.pop_front();
+            return rc;
         }
 
-        return Result::success();
+        _pending.pop_front();
     }
+
+    return Result::success();
+}
+
+
+Result Server::pump_reliable() {
+    for (auto& [key, state] : _peers) {
+        (void)key;
+        auto rc = state.reliable.resend_due(now_ms(), NetConfig::ReliableResendDelayMs,
+            [this, &state](PendingReliableMessage& pending) {
+                const U64 conn_id = (state.conn_id != 0) ? state.conn_id : 1;
+                return queue_message_frame(state.endpoint, conn_id, Channel::Reliable, pending.user_type,
+                    pending.encoded_payload.data(),
+                    static_cast<U16>(pending.encoded_payload.size()));
+            });
+        if (!rc.ok()) {
+            return rc;
+        }
+    }
+
+    return Result::success();
+}
+
+void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& from, U64 packet_conn_id,
+    const MsgView& msg, const OnMessageFn& message_handler) {
+    const U64 conn_id = (state.conn_id != 0) ? state.conn_id : packet_conn_id;
+
+    if (msg.channel == Channel::Control && msg.type == static_cast<U8>(ControlType::ReliableAck)) {
+        ByteReader ack_reader{ msg.data, static_cast<ST>(msg.len) };
+        U64 acked_message_id = 0;
+        auto rc = read_reliable_ack(ack_reader, acked_message_id);
+        if (rc.ok()) {
+            state.reliable.acknowledge(acked_message_id);
+        }
+        return;
+    }
+
+    if (msg.channel == Channel::Reliable) {
+        ByteReader reliable_reader{ msg.data, static_cast<ST>(msg.len) };
+        ReliablePayloadView reliable{};
+        auto rc = read_reliable_payload(reliable_reader, reliable);
+        if (!rc.ok()) {
+            return;
+        }
+
+        (void)queue_control_ack(from, conn_id, reliable.message_id);
+        if (!state.reliable.accept_incoming(reliable.message_id)) {
+            return;
+        }
+
+        if (message_handler) {
+            Peer peer{ this, from, conn_id };
+            MsgView delivered{};
+            delivered.channel = Channel::Reliable;
+            delivered.type = msg.type;
+            delivered.data = reliable.data;
+            delivered.len = reliable.len;
+            message_handler(peer, delivered);
+        }
+        return;
+    }
+
+    if (message_handler) {
+        Peer peer{ this, from, conn_id };
+        message_handler(peer, msg);
+    }
+}
 
     void Server::dispatch_packet_inline(const Endpoint& from, const U8* data, ST len) {
         PacketView packet{};
@@ -216,27 +339,27 @@ namespace scn {
         if (!rc.ok()) {
             return;
         }
+    
+        auto& state = ensure_peer_state(from, packet.h.conn_id);
 
         if (_on_packet) {
             _on_packet(from, packet);
         }
 
-        if (_on_message) {
-            Peer peer{ this, from, packet.h.conn_id };
-            ByteReader reader{ packet.payload, static_cast<ST>(packet.h.payload_len) };
-            for (;;) {
-                MsgView msg{};
-                auto msg_rc = read_message(reader, msg);
-                if (msg_rc.code == Errc::EndOfStream) {
-                    break;
-                }
-                if (!msg_rc.ok()) {
-                    break;
-                }
-
-                _on_message(peer, msg);
+        ByteReader reader{ packet.payload, static_cast<ST>(packet.h.payload_len) };
+        for (;;) {
+            MsgView msg{};
+            auto msg_rc = read_message(reader, msg);
+            if (msg_rc.code == Errc::EndOfStream) {
+                break;
             }
+            if (!msg_rc.ok()) {
+                break; 
+            }
+            
+            dispatch_message_frame(state, from, packet.h.conn_id, msg, _on_message);
         }
+
     }
 
     void Server::dispatch_packet_deferred(Endpoint from, std::vector<U8> data) {
@@ -251,12 +374,12 @@ namespace scn {
                 return; 
             }
 
+            auto& state = owner->ensure_peer_state(from, packet.h.conn_id);
+
             if (packet_handler) {
                 packet_handler(from, packet);
             }
 
-            if (message_handler) {
-                Peer peer{ owner, from, packet.h.conn_id };
                 ByteReader reader{ packet.payload, static_cast<ST>(packet.h.payload_len) };
                 for (;;) {
                     MsgView msg{};
@@ -268,9 +391,8 @@ namespace scn {
                         break;
                     }
 
-                    message_handler(peer, msg);
+                    owner->dispatch_message_frame(state, from, packet.h.conn_id, msg, message_handler);
                 }
-            }
 
         });
     }
@@ -308,6 +430,11 @@ namespace scn {
 
     Result Server::tick() {
         auto rc = flush_pending();
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        rc = pump_reliable();
         if (!rc.ok()) {
             return rc;
         }

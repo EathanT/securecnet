@@ -65,18 +65,30 @@ int test_client_server() {
 
     bool server_got_text = false;
     bool client_got_echo = false;
+    bool server_got_reliable = false;
+    bool client_got_reliable = false;
 
 
     srv.on_message([&](Server::Peer peer, const MsgView& msg) {
-        if (msg.type == kClientTextType && msg.text() == request_text) {
+        if (msg.channel == Channel::Unreliable && msg.type == kClientTextType && msg.text() == request_text) {
             server_got_text = true;
             (void)peer.send_text(kServerTextType, expected_reply);
+        }
+
+        if (msg.channel == Channel::Reliable && msg.type == kClientTextType && msg.text() == request_text) {
+            server_got_reliable = true;
+            const auto reply_bytes = std::span<const U8>(reinterpret_cast<const U8*>(expected_reply.data()), expected_reply.size());
+            (void)peer.send(Channel::Reliable, kServerTextType, reply_bytes);
         }
     });
 
     cli.on_message([&](const MsgView& msg) {
-        if (msg.type == kServerTextType && msg.text() == expected_reply) {
+        if (msg.channel == Channel::Unreliable && msg.type == kServerTextType && msg.text() == expected_reply) {
             client_got_echo = true;
+        }
+
+        if (msg.channel == Channel::Reliable && msg.type == kServerTextType && msg.text() == expected_reply) {
+            client_got_reliable = true;
         }
     });
 
@@ -86,6 +98,14 @@ int test_client_server() {
         return 1;
     }
 
+    const auto request_bytes = std::span<const U8>(reinterpret_cast<const U8*>(request_text.data()), request_text.size());
+    rc = cli.send(Channel::Reliable, kClientTextType, request_bytes);
+    if (!rc.ok()) {
+        std::printf(" ctx.send reliable failed\n");
+        return 1;
+    }
+
+
     rc = ctx.run_for(std::chrono::milliseconds(200));
     if (!rc.ok()) {
         std::printf(" ctx.run_for failed\n");
@@ -94,6 +114,9 @@ int test_client_server() {
 
     fails += expect(server_got_text, "server never received client text");
     fails += expect(client_got_echo, "client never received echoed text");
+    fails += expect(server_got_reliable, "server never received reliable client text");
+    fails += expect(client_got_reliable, "client never received reliable echoed text");
+
 
     cli.stop();
     srv.stop();

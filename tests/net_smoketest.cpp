@@ -1,3 +1,5 @@
+#pragma once
+
 #include "securecnet/scn.hpp"
 
 #include <cstdio>
@@ -20,6 +22,7 @@ static void usage() {
         "Examples:\n"
         "  net_smoketest --server 27015\n"
         "  net_smoketest --client 127.0.0.1 27015 --count 3 --interval-ms 100 --message hello\n"
+        "  net_smoketest --client 127.0.0.1 27015 --reliable --message secure\n"
     );
 }
 
@@ -53,9 +56,10 @@ static int run_server(const char* port_cstr) {
     std::fflush(stdout);
 
     srv.on_message([&](scn::Server::Peer peer, const scn::MsgView& msg) {
-        std::printf("[server] from=%s conn_id=%llu type=%u len=%u data=\"%.*s\"\n",
+        std::printf("[server] from=%s conn_id=%llu channel=%u type=%u len=%u data=\"%.*s\"\n",
             peer.endpoint().to_string().c_str(),
             static_cast<unsigned long long> (peer.conn_id()),
+            static_cast<unsigned>(msg.channel),
             static_cast<unsigned>(msg.type),
             static_cast<unsigned>(msg.len),
             static_cast<int>(msg.text().size()),
@@ -69,7 +73,8 @@ static int run_server(const char* port_cstr) {
         }
 
         const std::string reply = "echo:" + std::string(msg.text());
-        auto reply_rc = peer.send_text(kServerTextType, reply);
+        auto reply_bytes = std::span<const U8>(reinterpret_cast<const U8*>(reply.data()), reply.size());
+        auto reply_rc = peer.send(msg.channel, kServerTextType, reply_bytes);
         if (!reply_rc.ok()) {
             std::printf("[server] send_text failed: err=%u msg=%.*s\n",
                 static_cast<unsigned>(reply_rc.code),
@@ -94,7 +99,7 @@ static int run_server(const char* port_cstr) {
 }
 
 static int run_client(const char* host_cstr, const char* port_cstr, int count, int interval_ms,
-    const std::string& message_text) {
+    const std::string& message_text, bool reliable) {
     
     scn::io_context ctx;
     if (!ctx.runtime_status().ok()) {
@@ -121,6 +126,7 @@ static int run_client(const char* host_cstr, const char* port_cstr, int count, i
     cli.on_message([&](const scn::MsgView& msg) {
         const auto text = msg.text();
         std::printf("[client] type=%u len=%u data=\"%.*s\"\n",
+            static_cast<unsigned>(msg.channel),
             static_cast<unsigned>(msg.type),
             static_cast<unsigned>(msg.len),
             static_cast<int>(text.size()),
@@ -130,13 +136,17 @@ static int run_client(const char* host_cstr, const char* port_cstr, int count, i
         std::fflush(stdout);
 
         const std::string expected_reply = "echo:" + message_text;
-        if (msg.type == kServerTextType && text == expected_reply) {
+        if (msg.type == kServerTextType && text == expected_reply &&
+            msg.channel == (reliable ? scn::Channel::Reliable : scn::Channel::Unreliable)) { 
             ++echo_count;
         }
     });
+
+    const auto message_bytes = std::span<const U8>(reinterpret_cast<const U8*>(message_text.data()), message_text.size());
    
     for (int i = 0; i < count; ++i) {
-        std::printf("[client] sending message %d/%d: \"%s\"\n",
+        std::printf("[client] sending %s message %d/%d: \"%s\"\n",
+            reliable ? "reliable" : "unreliable",
             i + 1,
             count,
             message_text.c_str()
@@ -144,7 +154,9 @@ static int run_client(const char* host_cstr, const char* port_cstr, int count, i
 
         std::fflush(stdout);
 
-        rc = cli.send_text(kClientTextType, message_text);
+        rc = reliable
+            ? cli.send(scn::Channel::Reliable, kClientTextType, message_bytes)
+            : cli.send_text(kClientTextType, message_text);
         if (!rc.ok()) {
             std::printf("client.send_text failed: err=%u msg=%u, msg=%.*s\n",
                 static_cast<unsigned>(rc.code),
@@ -205,6 +217,7 @@ int main(int argc, char** argv) {
         int count = 20;
         int interval_ms = 100;
         std::string message_text = "ping";
+        bool reliable = false;
 
         for (int i = 4; i < argc; ++i) {
             if (std::strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
@@ -216,9 +229,12 @@ int main(int argc, char** argv) {
             else if (std::strcmp(argv[i], "--message") == 0 && i + 1 < argc) {
                 message_text = argv[++i];
             }
+            else if (std::strcmp(argv[i], "--reliable") == 0) {
+                reliable = true;
+            }
         }
 
-        return run_client(argv[2], argv[3], count, interval_ms, message_text);
+        return run_client(argv[2], argv[3], count, interval_ms, message_text, reliable);
     }
 
     usage();

@@ -7,6 +7,7 @@ int test_address();
 int test_packet();
 int test_udp();
 int test_client_server();
+int test_reliability();
 
 int main() {
     int fails = 0;
@@ -27,6 +28,7 @@ int main() {
     run("address", test_address);
     run("packet", test_packet);
     run("udp", test_udp);
+    run("reliability", test_reliability);
     run("client_server", test_client_server);
 
     std::printf("\nTotal fails: %d\n", fails);

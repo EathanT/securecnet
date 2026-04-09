@@ -2,14 +2,15 @@
 #include "securecnet/io_context.hpp"
 #include "securecnet/message.hpp"
 #include "securecnet/packet.hpp"
+#include "securecnet/reliability.hpp"
 #include "securecnet/result.hpp"
 #include "securecnet/socket_init.hpp"
 #include "securecnet/udp_socket.hpp"
 
 #include <array>
-#include <functional>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <span>
 #include <string_view>
 #include <utility>
@@ -59,10 +60,16 @@ namespace scn {
         Result context_poll() override;
         Result runtime_status() const;
         Result queue_payload(const U8* data, ST len);
+        Result queue_message_frame(Channel channel, U8 type, const void* data, U16 len);
+        Result queue_control_ack(U64 message_id);
+        Result send_reliable_message(U8 type, const void* data, U16 len);
         Result flush_pending();
+        Result pump_reliable();
         Result pump_receive();
+        void dispatch_message_frame(const MsgView& msg, const OnMessageFn& message_handler);
         void dispatch_packet_inline(const U8* data, ST len);
         void dispatch_packet_deferred(std::vector<U8> data);
+        static U64 now_ms();
 
         IoContext* _ctx{ nullptr };
         SocketInit _runtime{};
@@ -76,6 +83,7 @@ namespace scn {
         OnMessageFn _on_message{};
         U8 _rxbuf[NetConfig::MaxPacketBytes]{};
         std::deque<PendingPacket> _pending{};
+        ReliableSession _reliable{};
     };
 
 }

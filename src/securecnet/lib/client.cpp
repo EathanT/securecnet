@@ -3,6 +3,7 @@
 #include "securecnet/address.hpp"
 #include "securecnet/bytebuf.hpp"
 
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -19,7 +20,7 @@ namespace scn {
             for (const auto& ep : eps) {
                 const auto* sa = reinterpret_cast<const sockaddr*>(&ep.addr);
                 if (sa->sa_family == AF_INET) {
-                    return&ep;
+                    return &ep;
                 }
             }
 
@@ -69,6 +70,11 @@ namespace scn {
         }
     }
 
+    U64 Client::now_ms() {
+        return static_cast<U64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+
     Result Client::runtime_status() const {
         return _ctx ? _ctx->runtime_status() : _runtime.status();
     }
@@ -99,11 +105,12 @@ namespace scn {
 
         _seq = 1;
         _pending.clear();
+        _reliable.clear();
         return Result::success();
     }
 
     Result Client::connect(std::string_view host, std::string_view port) {
-        std::vector<Endpoint> eps; 
+        std::vector<Endpoint> eps;
         auto rc = resolve_endpoints(host, port, false, eps);
         if (!rc.ok()) {
             return rc;
@@ -123,6 +130,7 @@ namespace scn {
 
     void Client::stop() {
         _pending.clear();
+        _reliable.clear();
         _sock.close();
     }
 
@@ -134,7 +142,7 @@ namespace scn {
         return queue_payload(payload.data(), payload.size());
     }
 
-    Result Client::send_message(Channel channel, U8 type, const void* data, U16 len) {
+    Result Client::queue_message_frame(Channel channel, U8 type, const void* data, U16 len) {
         std::array<U8, NetConfig::MaxPacketBytes> payload{};
         ByteWriter writer{ payload.data(), payload.size() };
         auto rc = write_message(writer, channel, type, data, len);
@@ -143,6 +151,45 @@ namespace scn {
         }
 
         return queue_payload(payload.data(), writer.off);
+    }
+
+    Result Client::queue_control_ack(U64 message_id) {
+        U8 ack_buf[sizeof(U64)]{};
+        ByteWriter writer{ ack_buf, sizeof(ack_buf) };
+        auto rc = write_reliable_ack(writer, message_id);
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        return queue_message_frame(Channel::Control, static_cast<U8>(ControlType::ReliableAck), ack_buf,
+                                   static_cast<U16>(writer.off));
+    }
+
+    Result Client::send_reliable_message(U8 type, const void* data, U16 len) {
+        PendingReliableMessage pending{};
+        auto rc = _reliable.enqueue(type, data, len, pending);
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        rc = queue_message_frame(Channel::Reliable, type, pending.encoded_payload.data(),
+            static_cast<U16>(pending.encoded_payload.size()));
+
+        if (!rc.ok()) {
+            _reliable.acknowledge(pending.message_id);
+            return rc;
+        }
+
+        _reliable.note_sent(pending.message_id, now_ms());
+        return Result::success();
+    }
+
+    Result Client::send_message(Channel channel, U8 type, const void* data, U16 len) {
+        if (channel == Channel::Reliable) {
+            return send_reliable_message(type, data, len);
+        }
+
+        return queue_message_frame(channel, type, data, len);
     }
 
     Result Client::send(Channel channel, U8 type, std::span<const U8> payload) {
@@ -199,6 +246,56 @@ namespace scn {
         return Result::success();
     }
 
+    Result Client::pump_reliable() {
+        return _reliable.resend_due(now_ms(), NetConfig::ReliableResendDelayMs,
+            [this](PendingReliableMessage& pending) {
+                return queue_message_frame(Channel::Reliable, pending.user_type,
+                    pending.encoded_payload.data(),
+                    static_cast<U16>(pending.encoded_payload.size()));
+            });
+    }
+
+    void Client::dispatch_message_frame(const MsgView& msg, const OnMessageFn& message_handler) {
+        if (msg.channel == Channel::Control && msg.type == static_cast<U8>(ControlType::ReliableAck)) {
+            ByteReader ack_reader{ msg.data, static_cast<ST>(msg.len) };
+            U64 acked_message_id = 0;
+            auto rc = read_reliable_ack(ack_reader, acked_message_id);
+            if (rc.ok()) {
+                _reliable.acknowledge(acked_message_id);
+            }
+
+            return;
+        }
+
+        if (msg.channel == Channel::Reliable) {
+            ByteReader reliable_reader{ msg.data, static_cast<ST>(msg.len) };
+            ReliablePayloadView reliable{};
+            auto rc = read_reliable_payload(reliable_reader, reliable);
+            if (!rc.ok()) {
+                return;
+            }
+
+            (void)queue_control_ack(reliable.message_id);
+            if (!_reliable.accept_incoming(reliable.message_id)) {
+                return;
+            }
+
+            if (message_handler) {
+                MsgView delivered{};
+                delivered.channel = Channel::Reliable;
+                delivered.type = msg.type;
+                delivered.data = reliable.data;
+                delivered.len = reliable.len;
+                message_handler(delivered);
+            }
+            return;
+        }
+
+        if (message_handler) {
+            message_handler(msg);
+        }
+    }
+
     void Client::dispatch_packet_inline(const U8* data, ST len) {
         PacketView packet{};
         auto rc = parse_packet(data, len, packet);
@@ -210,7 +307,6 @@ namespace scn {
             _on_packet(packet);
         }
 
-        if (_on_message) {
             ByteReader reader{ packet.payload, static_cast<ST>(packet.h.payload_len) };
             for (;;) {
                 MsgView msg{};
@@ -222,15 +318,18 @@ namespace scn {
                     break;
                 }
 
-                _on_message(msg);
+                dispatch_message_frame(msg, _on_message);
             }
-        }
     }
 
     void Client::dispatch_packet_deferred(std::vector <U8> data) {
         auto packet_handler = _on_packet;
         auto message_handler = _on_message;
-        _ctx->post([packet_handler = std::move(packet_handler), message_handler = std::move(message_handler), data = std::move(data)]() mutable {
+        auto* owner  = this;
+
+        _ctx->post([packet_handler = std::move(packet_handler),
+                    message_handler = std::move(message_handler),
+                    data = std::move(data), owner]() mutable {
             PacketView packet{};
             auto rc = parse_packet(data.data(), data.size(), packet);
             if (!rc.ok()) {
@@ -241,7 +340,6 @@ namespace scn {
                 packet_handler(packet);
             }
 
-            if (message_handler) {
                 ByteReader reader{ packet.payload, static_cast<ST>(packet.h.payload_len) };
                 for (;;) {
                     MsgView msg{};
@@ -253,9 +351,8 @@ namespace scn {
                         break;
                     }
 
-                    message_handler(msg);
+                    owner->dispatch_message_frame(msg, message_handler);
                 }
-            }
         });
     }
 
@@ -288,6 +385,11 @@ namespace scn {
 
     Result Client::tick() {
         auto rc = flush_pending();
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        rc = pump_reliable();
         if (!rc.ok()) {
             return rc;
         }

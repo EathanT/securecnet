@@ -1,5 +1,6 @@
 #include "securecnet/address.hpp"
 #include "securecnet/platform.hpp"
+
 #include <cstring>
 #include <string>
 
@@ -31,9 +32,6 @@ namespace scn {
             hints.ai_flags |= AI_NUMERICSERV;
         }
 
-        // getaddrinfo expects null-terminated C strings
-        hints.ai_flags = passive ? AI_PASSIVE : 0;
-
         std::string host_s;
         const char* node = nullptr;
         if (!host.empty()) {
@@ -51,13 +49,12 @@ namespace scn {
             return Result::fail(Errc::ResolveError, gai_strerror(rc));
 #endif
         }
+
         if (!res) {
             return Result::fail(Errc::ResolveError, "getaddrinfo returned null");
         }
             
         
-        
-
         for (addrinfo* p = res; p; p = p->ai_next) {
             Endpoint ep{};
             std::memcpy(&ep.addr, p->ai_addr, p->ai_addrlen);

@@ -6,7 +6,7 @@ add_executable(scn_tests
   test_packet.cpp
   test_udp.cpp
   test_client_server.cpp
-)
+ "test_reliability.cpp")
 
 target_link_libraries(scn_tests PRIVATE securecnet)
 
@@ -14,7 +14,7 @@ add_test(NAME scn_tests COMMAND scn_tests)
 
 add_executable(net_smoketest
   net_smoketest.cpp
-)
+ "test_reliability.cpp")
 target_link_libraries(net_smoketest PRIVATE securecnet)
  
 

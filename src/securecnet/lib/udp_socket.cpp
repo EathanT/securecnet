@@ -1,5 +1,8 @@
 #include "securecnet/udp_socket.hpp"
+
+#include <cerrno>
 #include <cstring>
+#include <limits>
 
 namespace scn {
 
@@ -27,22 +30,39 @@ namespace scn {
 #endif
     }
 
+    static Result check_socket_len(ST len) {
+        if (len > static_cast<ST>(std::numeric_limits<int>::max())) {
+            return Result::fail(Errc::InvalidArg, "buffer too large for socket call");
+        }
+        return Result::success();
+    }
 
-    static Result send_datagram_common(socket_t s, const U8* data, ST len, const sockaddr* to, socklen_t to_len, bool connected) {
-        if (s == kInvalidSocket)
+    static Result send_datagram_common(socket_t s,const U8* data, ST len,
+                                       const sockaddr* to, socklen_t to_len,
+                                       bool connected) {
+        if (s == kInvalidSocket) {
             return Result::fail(Errc::InvalidArg, "socket not open");
-
-        if (!data && len > 0)
+        }
+        if (!data && len > 0) {
             return Result::fail(Errc::InvalidArg, "data is null");
-
-        int sent = -1;
-        if (connected) {
-            sent = ::send(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0);
-        }
-        else {
-            sent = ::sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0, to, to_len);
         }
 
+        auto rc = check_socket_len(len);
+        if (!rc.ok()) {
+            return rc;
+        }
+
+#ifdef _WIN32
+        int sent = connected
+            ? ::send(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0)
+            : ::sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0, to, to_len);
+#else
+        ssize_t sent = connected
+            ? ::send(s, reinterpret_cast<const char*>(data), len, 0);
+            : ::sendto(s, reinterpret_cast<const char*>(data), len, 0, to, to_len);
+#endif
+
+        
         if (sent < 0) {
             const int e = last_sock_err();
             if (is_would_block(e))
@@ -59,10 +79,18 @@ namespace scn {
 
     static Result recv_datagram_common(socket_t s, U8* out, ST out_cap, ST& out_len, Endpoint* from) {
         out_len = 0;
+
         if (s == kInvalidSocket)
             return Result::fail(Errc::InvalidArg, "socket not open");
+
         if (!out && out_cap > 0)
             return Result::fail(Errc::InvalidArg, "out is null");
+
+    
+        auto rc = check_socket_len(out_cap);
+        if (!rc.ok()) {
+            return rc;
+        }
 
         sockaddr_storage ss{};
         socklen_t slen = static_cast<socklen_t>(sizeof(ss));
@@ -73,13 +101,15 @@ namespace scn {
         const int flags = 0;
 #endif
 
-        int n = -1; 
-        if (from) {
-            n = ::recvfrom(s, reinterpret_cast<char*>(out), static_cast<int>(out_cap), flags, reinterpret_cast<sockaddr*>(&ss), &slen);
-        }
-        else {
-            n = ::recv(s, reinterpret_cast<char*>(out), static_cast<int>(out_cap), flags);
-        }
+#ifdef _WIN32
+        int n = from
+            ? ::recvfrom(s, reinterpret_cast<char*>(out), static_cast<int>(out_cap), flags, reinterpret_cast<sockaddr*>(&ss), &slen)
+            : ::recv(s, reinterpret_cast<char*>(out), static_cast<int>(out_cap), flags);
+#else
+        ssize_t n = from
+            ? ::recvfrom(s, reinterpret_cast<char*>(out), out_cap, flags, reinterpret_cast<sockaddr*>(&ss), &slen)
+            : ::recv(s, reinterpret_cast<char*>(out), out_cap, flags);
+#endif
 
         if (n < 0) {
             const int e = last_sock_err();
@@ -93,7 +123,7 @@ namespace scn {
             return Result::fail(Errc::SocketError, from ? "recvfrom() failed" : "recv() failed");
         }
 
-#ifdef __linux__
+#ifdef _WIN32
         if (static_cast<ST>(n) > out_cap) {
             return Result::fail(Errc::Truncated, "udp datagram truncated");
         }
@@ -117,7 +147,8 @@ namespace scn {
     }
 
     Result UdpSocket::open(int family) {
-        if (is_open()) return Result::success();
+        if (is_open()) 
+            return Result::success();
 
         _s = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
         if (_s == kInvalidSocket)

@@ -5,6 +5,8 @@
 #include "securecnet/udp_socket.hpp"
 #include "securecnet/packet.hpp"
 #include "securecnet/socket_init.hpp"
+#include "securecnet/reliability.hpp"
+
 #include <array>
 #include <deque>
 #include <functional>
@@ -13,6 +15,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <unordered_map>
 
 namespace scn {
 
@@ -78,13 +81,28 @@ namespace scn {
             ST len{ 0 };
         };
 
+        struct PeerTransportState {
+            Endpoint endpoint{};
+            U64 conn_id{ 0 };
+            ReliableSession reliable{};
+        };
+
         Result context_poll() override;
         Result runtime_status() const;
         Result queue_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len);
+        Result queue_message_frame(const Endpoint& to, U64 conn_id, Channel channel, U8 type, const void* data, U16 len);
+        Result queue_control_ack(const Endpoint& to, U64 conn_id, U64 message_id);
+        Result send_reliable_message(PeerTransportState& state, U8 type, const void* data, U16 len);
         Result flush_pending();
+        Result pump_reliable();
         Result pump_receive();
+
+        PeerTransportState& ensure_peer_state(const Endpoint& from, U64 conn_id);
+        void dispatch_message_frame(PeerTransportState& state, const Endpoint& from, U64 packet_conn_id,
+                                    const MsgView& msg, const OnMessageFn& message_handler); 
         void dispatch_packet_inline(const Endpoint& from, const U8* data, ST len);
         void dispatch_packet_deferred(Endpoint from, std::vector<U8> data);
+        static U64 now_ms();
 
         IoContext* _ctx{ nullptr };
         SocketInit _runtime{};
@@ -95,6 +113,7 @@ namespace scn {
         OnMessageFn _on_message{};
         U8 _rxbuf[NetConfig::MaxPacketBytes]{};
         std::deque<PendingPacket> _pending{};
+        std::unordered_map<std::string, PeerTransportState> _peers{};
     };
 
 }

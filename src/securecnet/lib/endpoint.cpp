@@ -3,11 +3,11 @@
 
 namespace scn {
 
-    static void* get_in_addr(sockaddr* sa) {
+    static const void* get_in_addr(const sockaddr* sa) {
         if (sa->sa_family == AF_INET)
-            return &(((sockaddr_in*)sa)->sin_addr);
+            return &reinterpret_cast<const sockaddr_in*>(sa)->sin_addr;
 
-        return &(((sockaddr_in6*)sa)->sin6_addr);
+        return &reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr;
     }
 
     U16 Endpoint::port() const {
@@ -33,8 +33,12 @@ namespace scn {
         }
 
         char ipstr[INET6_ADDRSTRLEN]{};
-        if (!inet_ntop(sa->sa_family, get_in_addr(const_cast<sockaddr*>(sa)), ipstr, sizeof(ipstr))) {
+        if (!inet_ntop(sa->sa_family, get_in_addr(sa), ipstr, sizeof(ipstr))) {
             return std::string("<invalid>:") + std::to_string(port());
+        }
+
+        if (sa->sa_family == AF_INET6) {
+            return std::string("[") + ipstr + "]:" + std::to_string(port());
         }
 
         return std::string(ipstr) + ":" + std::to_string(port());

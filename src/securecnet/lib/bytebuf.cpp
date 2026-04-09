@@ -4,12 +4,14 @@
 namespace scn {
 
     static Result need(ByteWriter& w, ST n) {
-        return (w.remaining() >= n) ? Result::success()
+        return (w.remaining() >= n)
+            ? Result::success()
             : Result::fail(Errc::Truncated, "ByteWriter overflow");
     }
 
     static Result need(ByteReader& r, ST n) {
-        return (r.remaining() >= n) ? Result::success()
+        return (r.remaining() >= n)
+            ? Result::success()
             : Result::fail(Errc::Truncated, "ByteReader underrun");
     }
 
@@ -26,8 +28,8 @@ namespace scn {
         auto rc = need(*this, 2);
         if (!rc.ok()) return rc;
         
-        dst[off++] = static_cast<U8>((v >> 8) & 0xFF);
-        dst[off++] = static_cast<U8>(v & 0xFF);
+        dst[off++] = static_cast<U8>((v >> 8) & 0xFFu);
+        dst[off++] = static_cast<U8>(v & 0xFFu);
         
         return Result::success();
     }
@@ -36,10 +38,10 @@ namespace scn {
         auto rc = need(*this, 4);
         if (!rc.ok()) return rc; 
 
-        dst[off++] = static_cast<U8>((v >> 24) & 0xFF);
-        dst[off++] = static_cast<U8>((v >> 16) & 0xFF);
-        dst[off++] = static_cast<U8>((v >> 8) & 0xFF);
-        dst[off++] = static_cast<U8>(v & 0xFF);
+        dst[off++] = static_cast<U8>((v >> 24) & 0xFFu);
+        dst[off++] = static_cast<U8>((v >> 16) & 0xFFu);
+        dst[off++] = static_cast<U8>((v >> 8) & 0xFFu);
+        dst[off++] = static_cast<U8>(v & 0xFFu);
         
         return Result::success();
     }
@@ -49,17 +51,23 @@ namespace scn {
         if (!rc.ok()) return rc;
         
         for (int i = 7; i >= 0; --i)
-            dst[off++] = static_cast<U8>((v >> (i * 8)) & 0xFF);
+            dst[off++] = static_cast<U8>((v >> (i * 8)) & 0xFFu);
         
         return Result::success();
     }
 
     Result ByteWriter::write_bytes(const void* p, ST n) {
+        if (n > 0 && !p) {
+            return Result::fail(Errc::InvalidArg, "ByteWriter source is null");
+        }
+
         auto rc = need(*this, n);
         if (!rc.ok()) return rc;
-        
-        std::memcpy(dst + off, p, n);
-        off += n;
+       
+        if (n > 0) {
+            std::memcpy(dst + off, p, n);
+            off += n;
+        }
         
         return Result::success();
     }
@@ -97,7 +105,10 @@ namespace scn {
     }
 
     Result ByteReader::read_u64(U64& v) {
-        auto rc = need(*this, 8); if (!rc.ok()) return rc;
+        auto rc = need(*this, 8);
+        if (!rc.ok()) 
+            return rc;
+
         v = 0;
         for (int i = 0; i < 8; ++i)
             v = (v << 8) | src[off + i];
@@ -107,11 +118,17 @@ namespace scn {
     }
 
     Result ByteReader::read_bytes(void* p, ST n) {
+        if (n > 0 && !p) {
+            return Result::fail(Errc::InvalidArg, "ByteReader destination is null");
+        }
+
         auto rc = need(*this, n);
         if (!rc.ok()) return rc;
-        
-        std::memcpy(p, src + off, n);
-        off += n;
+       
+        if (n > 0) {
+            std::memcpy(p, src + off, n);
+            off += n;
+        }
         
         return Result::success();
     }

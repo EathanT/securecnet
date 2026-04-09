@@ -16,8 +16,8 @@ static int expect(bool cond, const char* msg) {
 
 static void print_result(const scn::Result& r) {
     std::printf("  err=%u msg=%.*s\n",
-        r.code,
-        (int) r.msg.size(),
+        static_cast<unsigned>(r.code),
+        static_cast<int>(r.msg.size()),
         r.msg.data() ? r.msg.data() : "");
 }
 

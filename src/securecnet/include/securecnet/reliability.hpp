@@ -147,7 +147,7 @@ namespace scn {
 			_seen = 0;
 		}
 
-		U64 lastest() const {
+		U64 latest() const {
 			return _latest;
 		}
 
@@ -169,6 +169,10 @@ namespace scn {
 	class ReliableSession {
 	public:
 		Result enqueue(U8 user_type, const void* data, U16 len, PendingReliableMessage& out) {
+			if (_pending.size() >= NetConfig::MaxPendingReliableMessages) {
+				return Result::fail(Errc::QueueFull, "reliable queue full");
+			}
+
 			out = {};
 			out.message_id = _next_message_id++;
 			out.user_type = user_type;

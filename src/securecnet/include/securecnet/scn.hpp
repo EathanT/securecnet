@@ -14,4 +14,5 @@
 #include "securecnet/server.hpp"
 #include "securecnet/io_context.hpp"
 #include "securecnet/message.hpp"
+#include "securecnet/transport_stats.hpp"
 #include "securecnet/crypto.hpp"

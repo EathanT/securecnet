@@ -118,6 +118,27 @@ int test_client_server() {
     fails += expect(client_got_reliable, "client never received reliable echoed text");
 
 
+
+
+    const auto& client_stats = cli.stats();
+    const auto& server_stats = srv.stats();
+    fails += expect(client_stats.packets_sent >= 2, "client stats should count sent packets");
+    fails += expect(client_stats.packets_received >= 2, "client stats should count received packets");
+    fails += expect(client_stats.message_frames_sent >= 2, "client stats should count sent message frames");
+    fails += expect(client_stats.message_frames_received >= 2, "client stats should count received message frames");
+    fails += expect(client_stats.reliable_message_enqueued >= 1, "client stats should count reliable enqueues");
+    fails += expect(client_stats.reliable_messages_delivered >= 1, "client stats should count reliable deliveries");
+    fails += expect(client_stats.reliable_acks_sent >= 1, "client stats should count reliable acks sent");
+    fails += expect(client_stats.reliable_acks_received >= 1, "client stats should count reliable acks received");
+    fails += expect(server_stats.packets_sent >= 2, "server stats should count sent packets");
+    fails += expect(server_stats.packets_received >= 2, "server stats should count received packets");
+    fails += expect(server_stats.message_frames_sent >= 2, "server stats should count sent message frames");
+    fails += expect(server_stats.message_frames_received >= 2, "server stats should count received message frames");
+    fails += expect(server_stats.reliable_message_enqueued >= 1, "server stats should count reliable enqueues");
+    fails += expect(server_stats.reliable_messages_delivered >= 1, "server stats should count reliable deliveries");
+    fails += expect(server_stats.reliable_acks_sent >= 1, "server stats should count reliable acks sent");
+    fails += expect(server_stats.reliable_acks_received >= 1, "server stats should count reliable acks received");
+
     cli.stop();
     srv.stop();
     return fails;

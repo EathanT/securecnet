@@ -17,6 +17,8 @@ namespace scn {
         // Reliable channel prepends message id
 		static constexpr ST ReliableEnvelopeBytes = 8;
         static constexpr ST MaxReliableMessageBytes = MaxMessageBytes - ReliableEnvelopeBytes;
+        static constexpr ST MaxPendingPackets = 256;
+        static constexpr ST MaxPendingReliableMessages = 256;
         static constexpr U64 ReliableResendDelayMs = 50;
 
         static constexpr U16 ProtocolVersion = 1;

@@ -58,7 +58,7 @@ namespace scn {
             : ::sendto(s, reinterpret_cast<const char*>(data), static_cast<int>(len), 0, to, to_len);
 #else
         ssize_t sent = connected
-            ? ::send(s, reinterpret_cast<const char*>(data), len, 0);
+            ? ::send(s, reinterpret_cast<const char*>(data), len, 0)
             : ::sendto(s, reinterpret_cast<const char*>(data), len, 0, to, to_len);
 #endif
 
@@ -66,7 +66,7 @@ namespace scn {
         if (sent < 0) {
             const int e = last_sock_err();
             if (is_would_block(e))
-                return Result::fail(Errc::WouldBlock, connected ? "send woudld block" : "sendto would block");
+                return Result::fail(Errc::WouldBlock, connected ? "send would block" : "sendto would block");
 
             return Result::fail(Errc::SocketError, connected ? "send() failed" : "sendto() failed");
         }
@@ -125,6 +125,10 @@ namespace scn {
 
 #ifdef _WIN32
         if (static_cast<ST>(n) > out_cap) {
+            return Result::fail(Errc::Truncated, "udp datagram truncated");
+        }
+#else
+        if (n > static_cast<ssize_t>(out_cap)) {
             return Result::fail(Errc::Truncated, "udp datagram truncated");
         }
 #endif

@@ -6,6 +6,7 @@
 #include "securecnet/packet.hpp"
 #include "securecnet/socket_init.hpp"
 #include "securecnet/reliability.hpp"
+#include "securecnet/transport_stats.hpp"
 
 #include <array>
 #include <deque>
@@ -71,6 +72,10 @@ namespace scn {
         Result send_text(const Peer& peer, U8 type, std::string_view text);
         Result local_endpoint(Endpoint& out) const;
 
+        const TransportStats& stats() const { return _stats; }
+        void reset_stats() { _stats.reset(); }
+        ST peer_count() const { return _peers.size();  }
+
         void on_packet(OnPacketFn fn) { _on_packet = std::move(fn); }
         void on_message(OnMessageFn fn) { _on_message = std::move(fn); }
 
@@ -114,6 +119,7 @@ namespace scn {
         U8 _rxbuf[NetConfig::MaxPacketBytes]{};
         std::deque<PendingPacket> _pending{};
         std::unordered_map<std::string, PeerTransportState> _peers{};
+        TransportStats _stats{};
     };
 
 }

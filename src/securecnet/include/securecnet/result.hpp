@@ -14,6 +14,7 @@ namespace scn {
         BadPacket,
         Internal,
         EndOfStream,
+        QueueFull,
     };
 
     struct Result {

@@ -4,12 +4,20 @@
 namespace scn {
 
     static Result need(ByteWriter& w, ST n) {
+        if (n > 0 && !w.dst) {
+            return Result::fail(Errc::InvalidArg, "ByteWriter destination is null");
+        }
+
         return (w.remaining() >= n)
             ? Result::success()
             : Result::fail(Errc::Truncated, "ByteWriter overflow");
     }
 
     static Result need(ByteReader& r, ST n) {
+        if (n > 0 && !r.src) {
+            return Result::fail(Errc::InvalidArg, "ByteReader source is null");
+        }
+
         return (r.remaining() >= n)
             ? Result::success()
             : Result::fail(Errc::Truncated, "ByteReader underrun");
@@ -133,9 +141,15 @@ namespace scn {
         return Result::success();
     }
 
-    const uint8_t* ByteReader::peek_ptr(ST n) const {
-        if (remaining() < n)
+    const U8* ByteReader::peek_ptr(ST n) const {
+        if (remaining() < n) {
             return nullptr;
+        }
+
+        if (n > 0 && !src) {
+            return nullptr;
+        }
+
         
         return src + off;
     }

@@ -106,6 +106,7 @@ namespace scn {
         _seq = 1;
         _pending.clear();
         _reliable.clear();
+        _stats.reset();
         return Result::success();
     }
 
@@ -143,14 +144,20 @@ namespace scn {
     }
 
     Result Client::queue_message_frame(Channel channel, U8 type, const void* data, U16 len) {
-        std::array<U8, NetConfig::MaxPacketBytes> payload{};
+        std::array<U8, NetConfig::MaxPayloadBytes> payload{};
         ByteWriter writer{ payload.data(), payload.size() };
         auto rc = write_message(writer, channel, type, data, len);
         if (!rc.ok()) {
             return rc;
         }
 
-        return queue_payload(payload.data(), writer.off);
+        rc = queue_payload(payload.data(), writer.off);
+        if (!rc.ok()) {
+            return rc;
+        }
+        
+        ++_stats.message_frames_sent;
+        return Result::success();
     }
 
     Result Client::queue_control_ack(U64 message_id) {
@@ -161,16 +168,27 @@ namespace scn {
             return rc;
         }
 
-        return queue_message_frame(Channel::Control, static_cast<U8>(ControlType::ReliableAck), ack_buf,
+        rc = queue_message_frame(Channel::Control, static_cast<U8>(ControlType::ReliableAck), ack_buf,
                                    static_cast<U16>(writer.off));
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        ++_stats.reliable_acks_sent;
+        return Result::success();
     }
 
     Result Client::send_reliable_message(U8 type, const void* data, U16 len) {
         PendingReliableMessage pending{};
         auto rc = _reliable.enqueue(type, data, len, pending);
         if (!rc.ok()) {
+            if (rc.code == Errc::QueueFull) {
+                ++_stats.queue_full_events;
+            }
             return rc;
         }
+
+        ++_stats.reliable_message_enqueued;
 
         rc = queue_message_frame(Channel::Reliable, type, pending.encoded_payload.data(),
             static_cast<U16>(pending.encoded_payload.size()));
@@ -209,8 +227,12 @@ namespace scn {
     }
 
     Result Client::queue_payload(const U8* data, ST len) {
-        if (len > NetConfig::MaxPacketBytes) {
+        if (len > NetConfig::MaxPayloadBytes) {
             return Result::fail(Errc::InvalidArg, "payload too large");
+        }
+        if (_pending.size() >= NetConfig::MaxPendingPackets) {
+            ++_stats.queue_full_events;
+            return Result::fail(Errc::QueueFull, "pending packet queue full");
         }
 
         PacketHeader header{};
@@ -235,11 +257,15 @@ namespace scn {
             auto rc = _sock.send(pending.bytes.data(), pending.len);
             if (!rc.ok()) {
                 if (rc.code == Errc::WouldBlock) {
+                    ++_stats.would_block_events;
                     return Result::success();
                 }
+                ++_stats.socket_errors;
                 return rc;
             }
 
+            ++_stats.packets_sent;
+            _stats.bytes_sent += static_cast<U64>(pending.len);
             _pending.pop_front();
         }
 
@@ -249,9 +275,13 @@ namespace scn {
     Result Client::pump_reliable() {
         return _reliable.resend_due(now_ms(), NetConfig::ReliableResendDelayMs,
             [this](PendingReliableMessage& pending) {
-                return queue_message_frame(Channel::Reliable, pending.user_type,
+                auto rc = queue_message_frame(Channel::Reliable, pending.user_type,
                     pending.encoded_payload.data(),
                     static_cast<U16>(pending.encoded_payload.size()));
+                if (rc.ok()) {
+                    ++_stats.reliable_retransmits;
+                }
+                return rc;
             });
     }
 
@@ -262,6 +292,10 @@ namespace scn {
             auto rc = read_reliable_ack(ack_reader, acked_message_id);
             if (rc.ok()) {
                 _reliable.acknowledge(acked_message_id);
+                ++_stats.reliable_acks_received;
+            }
+            else {
+                ++_stats.bad_packets;
             }
 
             return;
@@ -272,6 +306,7 @@ namespace scn {
             ReliablePayloadView reliable{};
             auto rc = read_reliable_payload(reliable_reader, reliable);
             if (!rc.ok()) {
+                ++_stats.bad_packets;
                 return;
             }
 
@@ -280,6 +315,7 @@ namespace scn {
                 return;
             }
 
+            ++_stats.reliable_messages_delivered;
             if (message_handler) {
                 MsgView delivered{};
                 delivered.channel = Channel::Reliable;
@@ -300,6 +336,7 @@ namespace scn {
         PacketView packet{};
         auto rc = parse_packet(data, len, packet);
         if (!rc.ok()) {
+            ++_stats.bad_packets;
             return;
         }
 
@@ -315,9 +352,11 @@ namespace scn {
                     break;
                 }
                 if (!msg_rc.ok()) {
+                    ++_stats.bad_packets;
                     break;
                 }
 
+                ++_stats.message_frames_received;
                 dispatch_message_frame(msg, _on_message);
             }
     }
@@ -333,6 +372,7 @@ namespace scn {
             PacketView packet{};
             auto rc = parse_packet(data.data(), data.size(), packet);
             if (!rc.ok()) {
+                ++owner->_stats.bad_packets;
                 return;
             }
 
@@ -348,9 +388,11 @@ namespace scn {
                         break;
                     }
                     if (!msg_rc.ok()) {
+                        ++owner->_stats.bad_packets;
                         break;
                     }
 
+                    ++owner->_stats.message_frames_received;
                     owner->dispatch_message_frame(msg, message_handler);
                 }
         });
@@ -362,13 +404,19 @@ namespace scn {
             auto rc = _sock.recv(_rxbuf, sizeof(_rxbuf), n);
             if (!rc.ok()) {
                 if (rc.code == Errc::WouldBlock) {
+                    ++_stats.would_block_events;
                     break;
                 }
                 if (rc.code == Errc::Truncated) {
+                    ++_stats.truncated_datagrams;
                     continue;
                 }
+                ++_stats.socket_errors;
                 return rc;
             }
+
+            ++_stats.packets_received;
+            _stats.bytes_received += static_cast<U64>(n);
 
             if (_ctx) {
                 std::vector<U8> packet(n);

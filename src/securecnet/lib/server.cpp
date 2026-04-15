@@ -18,7 +18,7 @@ namespace scn {
             }
 
             for (const auto& ep : eps) {
-                const auto& sa = reinterpret_cast<const sockaddr*>(&ep.addr);
+                const auto* sa = reinterpret_cast<const sockaddr*>(&ep.addr);
                 if (sa->sa_family == AF_INET) {
                     return &ep;
                 }
@@ -59,7 +59,7 @@ namespace scn {
 
     Result Server::Peer::send_text(U8 type, std::string_view text) const {
         if (text.size() > static_cast<ST>(std::numeric_limits < U16>::max())) {
-            return Result::fail(Errc::InvalidArg, "texdt payload too large");
+            return Result::fail(Errc::InvalidArg, "text payload too large");
         }
 
         return send_message(Channel::Unreliable, type, text.data(), static_cast<U16>(text.size()));
@@ -111,6 +111,7 @@ namespace scn {
         _seq = 1;
         _pending.clear();
         _peers.clear();
+        _stats.reset();
         return Result::success(); 
     }
 
@@ -149,8 +150,12 @@ namespace scn {
     }
 
     Result Server::queue_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len) {
-        if (len > (NetConfig::MaxPacketBytes)) {
+        if (len > NetConfig::MaxPayloadBytes) {
             return Result::fail(Errc::InvalidArg, "payload too large");
+        }
+        if (_pending.size() >= NetConfig::MaxPendingPackets) {
+            ++_stats.queue_full_events;
+            return Result::fail(Errc::QueueFull, "pending packet queue full");
         }
 
         PacketHeader header{};
@@ -177,7 +182,13 @@ namespace scn {
             return rc;
         }
 
-        return queue_payload(to, conn_id, payload.data(), writer.off);
+        rc =  queue_payload(to, conn_id, payload.data(), writer.off);
+        if (!rc.ok()) {
+            return rc;
+        }
+
+        ++_stats.message_frames_sent;
+        return Result::success();
     }
 
     Result Server::queue_control_ack(const Endpoint& to, U64 conn_id, U64 message_id) {
@@ -188,17 +199,28 @@ namespace scn {
             return rc;
         }
 
-        return queue_message_frame(to, conn_id, Channel::Control,
+        rc =  queue_message_frame(to, conn_id, Channel::Control,
                                    static_cast<U8>(ControlType::ReliableAck),
                                    ack_buf, static_cast<U16>(writer.off));
+        if (!rc.ok()) {
+            return rc;
+        }
+        
+        ++_stats.reliable_acks_sent;
+        return Result::success();
     }
 
 Result Server::send_reliable_message(PeerTransportState& state, U8 type, const void* data, U16 len) {
     PendingReliableMessage pending{};
     auto rc = state.reliable.enqueue(type, data, len, pending);
     if (!rc.ok()) {
+        if (rc.code == Errc::QueueFull) {
+            ++_stats.queue_full_events;
+        }
         return rc;
     }
+
+    ++_stats.reliable_message_enqueued; 
 
     const U64 conn_id = (state.conn_id != 0) ? state.conn_id : 1;
     rc = queue_message_frame(state.endpoint, conn_id, Channel::Reliable, type,
@@ -258,11 +280,15 @@ Result Server::flush_pending() {
         auto rc = _sock.send_to(pending.to, pending.bytes.data(), pending.len);
         if (!rc.ok()) {
             if (rc.code == Errc::WouldBlock) {
+                ++_stats.would_block_events;
                 return Result::success();
             }
+            ++_stats.socket_errors;
             return rc;
         }
 
+        ++_stats.packets_sent;
+        _stats.bytes_sent += static_cast<U64>(pending.len);
         _pending.pop_front();
     }
 
@@ -276,9 +302,13 @@ Result Server::pump_reliable() {
         auto rc = state.reliable.resend_due(now_ms(), NetConfig::ReliableResendDelayMs,
             [this, &state](PendingReliableMessage& pending) {
                 const U64 conn_id = (state.conn_id != 0) ? state.conn_id : 1;
-                return queue_message_frame(state.endpoint, conn_id, Channel::Reliable, pending.user_type,
+                auto resend_rc =  queue_message_frame(state.endpoint, conn_id, Channel::Reliable, pending.user_type,
                     pending.encoded_payload.data(),
                     static_cast<U16>(pending.encoded_payload.size()));
+                if (resend_rc.ok()) {
+                    ++_stats.reliable_retransmits;
+                }
+                return resend_rc;
             });
         if (!rc.ok()) {
             return rc;
@@ -298,6 +328,10 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
         auto rc = read_reliable_ack(ack_reader, acked_message_id);
         if (rc.ok()) {
             state.reliable.acknowledge(acked_message_id);
+            ++_stats.reliable_acks_received;
+        }
+        else {
+            ++_stats.bad_packets;
         }
         return;
     }
@@ -307,6 +341,7 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
         ReliablePayloadView reliable{};
         auto rc = read_reliable_payload(reliable_reader, reliable);
         if (!rc.ok()) {
+            ++_stats.bad_packets;
             return;
         }
 
@@ -315,6 +350,7 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
             return;
         }
 
+        ++_stats.reliable_messages_delivered;
         if (message_handler) {
             Peer peer{ this, from, conn_id };
             MsgView delivered{};
@@ -337,6 +373,7 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
         PacketView packet{};
         auto rc = parse_packet(data, len, packet);
         if (!rc.ok()) {
+            ++_stats.bad_packets;
             return;
         }
     
@@ -354,9 +391,11 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
                 break;
             }
             if (!msg_rc.ok()) {
+                ++_stats.bad_packets;
                 break; 
             }
             
+            ++_stats.message_frames_received;
             dispatch_message_frame(state, from, packet.h.conn_id, msg, _on_message);
         }
 
@@ -371,6 +410,7 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
             PacketView packet{};
             auto rc = parse_packet(data.data(), data.size(), packet);
             if (!rc.ok()) {
+                ++owner->_stats.bad_packets;
                 return; 
             }
 
@@ -388,9 +428,11 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
                         break;
                     }
                     if (!msg_rc.ok()) {
+                        ++owner->_stats.bad_packets;
                         break;
                     }
 
+                    ++owner->_stats.message_frames_received;
                     owner->dispatch_message_frame(state, from, packet.h.conn_id, msg, message_handler);
                 }
 
@@ -406,14 +448,20 @@ void Server::dispatch_message_frame(PeerTransportState& state, const Endpoint& f
             auto rc = _sock.recv_from(from, _rxbuf, sizeof(_rxbuf), n);
             if (!rc.ok()) {
                 if (rc.code == Errc::WouldBlock) {
+                    ++_stats.would_block_events;
                     break;
                 }
                 if (rc.code == Errc::Truncated) {
+                    ++_stats.truncated_datagrams;
                     continue;
                 }
 
+                ++_stats.socket_errors;
                 return rc;
             }
+
+            ++_stats.packets_received;
+            _stats.bytes_received += static_cast<U64>(n);
 
             if (_ctx) {
                 std::vector<U8> packet(n);

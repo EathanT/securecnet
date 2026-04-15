@@ -97,6 +97,53 @@ int test_udp() {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+
+
+    // recv_from should report truncated datagrams when the caller buffer is too small
+    {
+        U8 small_payload[32]{};
+        for (int i = 0; i < 32; ++i) {
+            small_payload[i] = static_cast<U8>(i);
+        }
+
+        auto send_rc = client.send_to(server_local, small_payload, sizeof(small_payload));
+        fails += expect(send_rc.ok(), "truncate send failed");
+
+        U8 tiny_buf[8]{};
+        ST tiny_len = 0;
+        Endpoint tiny_from{};
+        auto truncate_start = std::chrono::steady_clock::now();
+        bool got_truncated = false;
+
+        while (!got_truncated) {
+            auto recv_rc = server.recv_from(tiny_from, tiny_buf, sizeof(tiny_buf), tiny_len);
+            if (recv_rc.code == Errc::Truncated) {
+                got_truncated = true;
+                break;
+            }
+            if (recv_rc.ok()) {
+                std::printf("  expected truncated datagram but recv succeeded\n");
+                ++fails;
+                break;
+            }
+            if (recv_rc.code != Errc::WouldBlock) {
+                std::printf("  unexpected recv status while waiting for truncation\n");
+                ++fails;
+                break;
+            }
+
+            auto now = std::chrono::steady_clock::now();
+            if (now - truncate_start > std::chrono::milliseconds(500)) {
+                std::printf("  timed out waiting for truncated packet\n");
+                ++fails;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        fails += expect(got_truncated, "recv_from should report truncated datagram");
+    }
+
     // parse packet
     PacketView pv{};
     rc = parse_packet(rbuf, rlen, pv);

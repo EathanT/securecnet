@@ -5,16 +5,26 @@ add_executable(scn_tests
   test_address.cpp
   test_packet.cpp
   test_udp.cpp
+  test_protocol.cpp
+  test_reliability_ext.cpp
+  test_mtu.cpp
+  test_abuse.cpp
+  test_soak.cpp
+  test_nat_stream.cpp
+  test_config.cpp
+  test_fragmentation.cpp
+  test_channels.cpp
   test_client_server.cpp
- "test_reliability.cpp")
+  test_fragment_transport.cpp
+  test_reliability.cpp
+  test_security.cpp
+  test_resumption.cpp
+  test_fuzz.cpp
+  test_validation_hardening.cpp
+  test_async.cpp
+)
 
-target_link_libraries(scn_tests PRIVATE securecnet)
+target_link_libraries(scn_tests PRIVATE securecnet::securecnet)
+securecnet_enable_target_warnings(scn_tests)
 
 add_test(NAME scn_tests COMMAND scn_tests)
-
-add_executable(net_smoketest
-  net_smoketest.cpp
- "test_reliability.cpp")
-target_link_libraries(net_smoketest PRIVATE securecnet)
- 
-

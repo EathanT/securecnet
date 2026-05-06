@@ -12,6 +12,11 @@ namespace scn {
         UdpSocket() = default;
         ~UdpSocket();
 
+        UdpSocket(const UdpSocket&) = delete;
+        UdpSocket& operator=(const UdpSocket&) = delete;
+        UdpSocket(UdpSocket&& other) noexcept;
+        UdpSocket& operator=(UdpSocket&& other) noexcept;
+
         Result open(int family);
         Result bind(const Endpoint& local);
         Result connect(const Endpoint& remote);

@@ -1,5 +1,7 @@
 #pragma once
+
 #include <string_view>
+
 #include "securecnet/util/util.h"
 
 namespace scn {
@@ -15,6 +17,16 @@ namespace scn {
         Internal,
         EndOfStream,
         QueueFull,
+        UnsupportedVersion,
+        AuthFailed,
+        Timeout,
+        Closed,
+        StateError,
+        Replay,
+        ProtocolError,
+        TooLarge,
+        RateLimited,
+        Backpressure,
     };
 
     struct Result {
@@ -34,4 +46,4 @@ namespace scn {
         }
     };
 
-}
+} // namespace scn

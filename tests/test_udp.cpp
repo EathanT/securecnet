@@ -63,6 +63,7 @@ int test_udp() {
     h.flags = 0;
     h.conn_id = 1;
     h.seq = 1;
+    h.payload_len = static_cast<U32>(pw.off);
 
     U8 pkt[NetConfig::MaxPacketBytes]{};
     ST pkt_len = 0;

@@ -1,5 +1,7 @@
 #include "securecnet/udp_socket.hpp"
 
+#include "securecnet/socket_init.hpp"
+
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -35,6 +37,51 @@ namespace scn {
             return Result::fail(Errc::InvalidArg, "buffer too large for socket call");
         }
         return Result::success();
+    }
+
+    static Result ensure_socket_runtime() {
+        static SocketInit socket_runtime;
+        return socket_runtime.status();
+    }
+
+#ifdef _WIN32
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
+    static void disable_udp_connreset(socket_t s) {
+        BOOL new_behavior = FALSE;
+        DWORD bytes_returned = 0;
+        (void)::WSAIoctl(s, SIO_UDP_CONNRESET,
+                         &new_behavior, sizeof(new_behavior),
+                         nullptr, 0, &bytes_returned,
+                         nullptr, nullptr);
+    }
+#endif
+
+    static Endpoint normalize_send_endpoint(const Endpoint& ep) {
+        Endpoint normalized = ep;
+
+        if (normalized.len == 0) {
+            return normalized;
+        }
+
+        auto* sa = reinterpret_cast<sockaddr*>(&normalized.addr);
+
+        if (sa->sa_family == AF_INET) {
+            auto* sin = reinterpret_cast<sockaddr_in*>(sa);
+            if (sin->sin_addr.s_addr == htonl(INADDR_ANY)) {
+                sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            }
+        }
+        else if (sa->sa_family == AF_INET6) {
+            auto* sin6 = reinterpret_cast<sockaddr_in6*>(sa);
+            if (IN6_IS_ADDR_UNSPECIFIED(&sin6->sin6_addr)) {
+                sin6->sin6_addr = in6addr_loopback;
+            }
+        }
+
+        return normalized;
     }
 
     static Result send_datagram_common(socket_t s,const U8* data, ST len,
@@ -117,7 +164,10 @@ namespace scn {
                 return Result::fail(Errc::WouldBlock, from ? "recvfrom would block" : "recv would block");
 #ifdef _WIN32
             if (e == WSAEMSGSIZE) {
-                return Result::fail(Errc::Truncated, "udp datagram truncated)");
+                return Result::fail(Errc::Truncated, "udp datagram truncated");
+            }
+            if (e == WSAECONNRESET) {
+                return Result::fail(Errc::WouldBlock, from ? "recvfrom ignored udp connection reset" : "recv ignored udp connection reset");
             }
 #endif
             return Result::fail(Errc::SocketError, from ? "recvfrom() failed" : "recv() failed");
@@ -146,6 +196,20 @@ namespace scn {
         close(); 
     }
 
+    UdpSocket::UdpSocket(UdpSocket&& other) noexcept
+        : _s(other._s) {
+        other._s = kInvalidSocket;
+    }
+
+    UdpSocket& UdpSocket::operator=(UdpSocket&& other) noexcept {
+        if (this != &other) {
+            close();
+            _s = other._s;
+            other._s = kInvalidSocket;
+        }
+        return *this;
+    }
+
     bool UdpSocket::is_open() const {
         return _s != kInvalidSocket; 
     }
@@ -154,9 +218,18 @@ namespace scn {
         if (is_open()) 
             return Result::success();
 
+        auto runtime = ensure_socket_runtime();
+        if (!runtime.ok()) {
+            return runtime;
+        }
+
         _s = ::socket(family, SOCK_DGRAM, IPPROTO_UDP);
         if (_s == kInvalidSocket)
             return Result::fail(Errc::SocketError, "socket() failed");
+
+#ifdef _WIN32
+        disable_udp_connreset(_s);
+#endif
 
         return Result::success();
     }
@@ -216,7 +289,8 @@ namespace scn {
     }
 
     Result UdpSocket::send_to(const Endpoint& to, const U8* data, ST len) {
-        return send_datagram_common(_s, data, len, reinterpret_cast<const sockaddr*>(&to.addr), to.len, false);
+        Endpoint target = normalize_send_endpoint(to);
+        return send_datagram_common(_s, data, len, reinterpret_cast<const sockaddr*>(&target.addr), target.len, false);
     }
 
     Result UdpSocket::send(const U8* data, ST len) {

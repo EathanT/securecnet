@@ -3,9 +3,15 @@
 #include "securecnet/result.hpp"
 #include "securecnet/socket_init.hpp"
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 
@@ -20,7 +26,7 @@ namespace scn {
 	class IoContext {
 	public:
 		IoContext() = default;
-		~IoContext() = default;
+		~IoContext();
 
 		IoContext(const IoContext&) = delete;
 		IoContext& operator=(const IoContext&) = delete;
@@ -29,8 +35,21 @@ namespace scn {
 
 		void post(std::function<void()> fn);
 
+		template <class Fn>
+		auto post_task(Fn&& fn) -> std::future<std::invoke_result_t<std::decay_t<Fn>&>> {
+			using Task = std::decay_t<Fn>;
+			using Return = std::invoke_result_t<Task&>;
+
+			auto packaged = std::make_shared<std::packaged_task<Return()>>(Task(std::forward<Fn>(fn)));
+			auto future = packaged->get_future();
+			post([packaged]() mutable { (*packaged)(); });
+			return future;
+		}
+
 		Result poll();
 		Result run();
+		Result run_async();
+		Result join();
 
 		template <class Rep, class Period>
 		Result run_for(const std::chrono::duration<Rep, Period>& duration) {
@@ -43,22 +62,51 @@ namespace scn {
 				return _runtime.status();
 			}
 
-			_stop_requested = false;
-			while (!_stop_requested && Clock::now() < deadline) {
-				auto rc = poll();
-				if (!rc.ok()) {
-					return rc;
+			{
+				std::lock_guard<std::mutex> lock(_mutex);
+				if (_running) {
+					return Result::fail(Errc::StateError, "IoContext is already running");
+				}
+				_stop_requested = false;
+				_running = true;
+				_run_result = Result::success();
+			}
+			_cv.notify_all();
+
+			Result result = Result::success();
+			while (Clock::now() < deadline) {
+				{
+					std::lock_guard<std::mutex> lock(_mutex);
+					if (_stop_requested) {
+						break;
+					}
 				}
 
-				std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				auto rc = poll();
+				if (!rc.ok()) {
+					result = rc;
+					break;
+				}
+
+				std::unique_lock<std::mutex> lock(_mutex);
+				if (!_stop_requested && _posted.empty()) {
+					_cv.wait_for(lock, std::chrono::milliseconds(1));
+				}
 			}
 
-			return Result::success();
+			{
+				std::lock_guard<std::mutex> lock(_mutex);
+				_running = false;
+				_run_result = result;
+			}
+			_cv.notify_all();
+			return result;
 		}
 
-		void stop() { _stop_requested = true; }
-		void restart() { _stop_requested = false; }
-		bool stopped() const { return _stop_requested; }
+		void stop();
+		void restart();
+		bool stopped() const;
+		bool running() const;
 
 	private:
 		friend class Client;
@@ -71,6 +119,11 @@ namespace scn {
 		SocketInit _runtime{};
 		std::vector<IoContextService*> _services{};
 		std::deque<std::function<void()>> _posted{};
+		mutable std::mutex _mutex{};
+		std::condition_variable _cv{};
+		std::thread _worker{};
+		Result _run_result{};
+		bool _running{ false };
 		bool _stop_requested{ false };
 
 	};

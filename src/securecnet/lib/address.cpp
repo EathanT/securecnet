@@ -1,5 +1,6 @@
 #include "securecnet/address.hpp"
 #include "securecnet/platform.hpp"
+#include "securecnet/socket_init.hpp"
 
 #include <cstring>
 #include <string>
@@ -11,6 +12,12 @@ namespace scn {
                              bool passive, std::vector<Endpoint>& out)
     {
         out.clear();
+
+        static SocketInit socket_runtime;
+        auto socket_status = socket_runtime.status();
+        if (!socket_status.ok()) {
+            return socket_status;
+        }
 
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;

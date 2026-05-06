@@ -1,5 +1,3 @@
-#pragma once
-
 #include "securecnet/scn.hpp"
 
 #include <cstdio>
@@ -46,6 +44,7 @@ static int run_server(const char* port_cstr) {
     }
 
     scn::Endpoint local{};
+    rc = srv.local_endpoint(local);
     if (!rc.ok()) {
         std::printf("server.local_endpoint failed: err=%u msg %.*s\n",
             static_cast<unsigned>(rc.code), static_cast<int>(rc.msg.size()), rc.msg.data());
@@ -143,7 +142,14 @@ static int run_client(const char* host_cstr, const char* port_cstr, int count, i
     });
 
     const auto message_bytes = std::span<const U8>(reinterpret_cast<const U8*>(message_text.data()), message_text.size());
-   
+
+    rc = ctx.run_for(std::chrono::milliseconds(250));
+    if (!rc.ok() || cli.state() != scn::ConnectionState::Established) {
+        std::printf("client handshake failed: err=%u msg=%.*s\n",
+            static_cast<unsigned>(rc.code), static_cast<int>(rc.msg.size()), rc.msg.data());
+        return 1;
+    }
+
     for (int i = 0; i < count; ++i) {
         std::printf("[client] sending %s message %d/%d: \"%s\"\n",
             reliable ? "reliable" : "unreliable",

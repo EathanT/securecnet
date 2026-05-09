@@ -4,6 +4,7 @@ set(SECURECNET_EXAMPLE_TARGETS
   state_sync_example
   large_message_example
   async_echo_example
+  request_reply_example
 )
 
 add_executable(secure_echo_example secure_echo_example.cpp)
@@ -11,6 +12,7 @@ add_executable(secure_chat_example secure_chat_example.cpp)
 add_executable(state_sync_example state_sync_example.cpp)
 add_executable(large_message_example large_message_example.cpp)
 add_executable(async_echo_example async_echo_example.cpp)
+add_executable(request_reply_example request_reply_example.cpp)
 
 foreach(target IN LISTS SECURECNET_EXAMPLE_TARGETS)
   target_link_libraries(${target} PRIVATE securecnet::securecnet)

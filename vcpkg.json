@@ -1,0 +1,8 @@
+{
+  "name": "securecnet",
+  "version-string": "0.3.0",
+  "description": "Secure message-oriented UDP transport for C++20 applications.",
+  "dependencies": [
+    "libsodium"
+  ]
+}

@@ -23,6 +23,9 @@ int test_resumption();
 int test_fuzz();
 int test_validation_hardening();
 int test_async();
+int test_api_ergonomics();
+int test_app_helpers();
+int test_router_request_reply();
 
 int main() {
     int fails = 0;
@@ -60,6 +63,9 @@ int main() {
     run("fuzz", test_fuzz);
     run("validation_hardening", test_validation_hardening);
     run("async", test_async);
+    run("api_ergonomics", test_api_ergonomics);
+    run("app_helpers", test_app_helpers);
+    run("router_request_reply", test_router_request_reply);
 
     std::printf("\nTotal fails: %d\n", fails);
     return fails ? 1 : 0;

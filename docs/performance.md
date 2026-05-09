@@ -11,6 +11,7 @@ The `bench/` directory ships with:
 - `bench_fragmented_transfer` — encode/reassemble throughput for fragmented transfers.
 - `bench_allocation_profile` — lightweight allocation counting for packet, reliable, and fragmentation hot paths.
 - `bench_async_io_context` — posted callback throughput for the async context queue.
+- `bench_router_dispatch` — route-table dispatch overhead for application message routers.
 
 ## What to measure first
 
@@ -19,10 +20,13 @@ The `bench/` directory ships with:
 3. Fragmented-message throughput.
 4. Allocations per operation in the hot path.
 5. Posted callback overhead if using `IoContext::run_async`.
+6. Router dispatch overhead if your application uses large route tables.
+7. Congestion-control pacing behavior under ACK, retransmission, and queue-pressure signals.
 
 ## Current tuning knobs
 
 - send budgets per client/server
+- optional adaptive congestion-control rate bounds and backoff gains
 - reliable queue size and inflight limits
 - retransmission timeout bounds
 - ordered receive window size

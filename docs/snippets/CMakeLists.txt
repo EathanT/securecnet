@@ -1,0 +1,10 @@
+add_executable(doc_snippet_basic_client basic_client.cpp)
+add_executable(doc_snippet_async_client async_client.cpp)
+add_executable(doc_snippet_server server.cpp)
+add_executable(doc_snippet_router_request_reply router_request_reply.cpp)
+
+foreach(target IN ITEMS doc_snippet_basic_client doc_snippet_async_client doc_snippet_server doc_snippet_router_request_reply)
+  target_link_libraries(${target} PRIVATE securecnet::securecnet)
+  target_compile_features(${target} PRIVATE cxx_std_20)
+  securecnet_enable_target_warnings(${target})
+endforeach()

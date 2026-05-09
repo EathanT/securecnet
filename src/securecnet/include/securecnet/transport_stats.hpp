@@ -88,6 +88,12 @@ namespace scn {
         U64 current_send_budget_bytes{ 0 };
         U64 estimated_loss_per_mille{ 0 };
 
+        U64 congestion_current_rate_bytes_per_second{ 0 };
+        U64 congestion_current_window_bytes{ 0 };
+        U64 congestion_ack_events{ 0 };
+        U64 congestion_loss_events{ 0 };
+        U64 congestion_backpressure_events{ 0 };
+
         void reset() {
             *this = {};
         }

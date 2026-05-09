@@ -71,7 +71,7 @@ Completed in code, examples, benchmarks, and tests:
 ### Correctness and hardening
 
 - `UdpSocket` is now explicitly move-only, preventing accidental double-close/socket-handle aliasing.
-- CMake libsodium discovery now supports pkg-config, bundled SDK hints, common system locations, and versioned runtime library names.
+- CMake libsodium discovery supports pkg-config, an optional SDK root, common system locations, and versioned runtime library names.
 - Message, close-frame, reliable-envelope, ACK, and fragment parsing now reject invalid enum values and reserved zero reliable IDs earlier.
 - Fragment reassembly performs defensive validation before indexing or allocation-sensitive work.
 - AEAD helpers reject null AAD pointers when a nonzero AAD length is supplied.
@@ -85,3 +85,16 @@ Completed in code, examples, benchmarks, and tests:
 - `tests/test_async.cpp` covers async runner lifecycle, `post_task`, and async client/server echo.
 - `docs/async_runtime.md` documents the async model and lifetime boundary.
 - `CHANGELOG_UPGRADE.md` summarizes the capstone upgrade and validation results.
+
+
+## 0.3 professional usability and hygiene pass
+
+Completed in this pass:
+
+- Added `ClientRouter` and `ServerRouter` to replace repeated application-side message switches.
+- Added request/reply envelope helpers and `ClientRequestTable` for correlated application transactions without changing the transport wire protocol.
+- Added a request/reply example, router/request tests, router dispatch benchmark, and compiled documentation snippet.
+- Bumped package version to `0.3.0`; wire protocol version remains `3`.
+- Removed heavyweight vendored libsodium binary artifacts while keeping optional header-only convenience files and package manager metadata.
+- Removed duplicate/legacy source files from the implementation tree and fixed the conflicted `.gitignore`.
+- Added vcpkg, Conan, and GitHub Actions CI metadata.

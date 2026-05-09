@@ -99,11 +99,47 @@ namespace scn {
     }
 
     Result Server::Peer::send_text(U8 type, std::string_view text) const {
+        return send_text(type, text, SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 });
+    }
+
+    Result Server::Peer::send_text(U8 type, std::string_view text, const SendOptions& options) const {
         if (text.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
-            return Result::fail(Errc::InvalidArg, "text payload too large");
+            return Result::fail(Errc::TooLarge, "text payload too large");
         }
-        return send(SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 }, type,
+        return send(options, type,
                     std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()));
+    }
+
+    Result Server::Peer::send_unreliable(U8 type, std::span<const U8> payload, SendPriority priority) const {
+        return send(SendOptions{ Channel::Unreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::Peer::send_reliable(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) const {
+        return send(SendOptions{ Channel::Reliable, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::Peer::send_ordered(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) const {
+        return send(SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::Peer::send_latest(U8 type, std::span<const U8> payload, SendPriority priority) const {
+        return send(SendOptions{ Channel::SequencedUnreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::Peer::send_unreliable_text(U8 type, std::string_view text, SendPriority priority) const {
+        return send_text(type, text, SendOptions{ Channel::Unreliable, priority, 0 });
+    }
+
+    Result Server::Peer::send_reliable_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) const {
+        return send_text(type, text, SendOptions{ Channel::Reliable, priority, lifetime_ms });
+    }
+
+    Result Server::Peer::send_ordered_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) const {
+        return send_text(type, text, SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms });
+    }
+
+    Result Server::Peer::send_latest_text(U8 type, std::string_view text, SendPriority priority) const {
+        return send_text(type, text, SendOptions{ Channel::SequencedUnreliable, priority, 0 });
     }
 
     Result Server::Peer::close(CloseReason reason) const {
@@ -111,6 +147,17 @@ namespace scn {
             return Result::fail(Errc::InvalidArg, "peer is not bound to a server");
         }
         return _owner->close_peer(*this, reason);
+    }
+
+    Result Server::Peer::set_user_data(void* data) const {
+        if (!_owner) {
+            return Result::fail(Errc::InvalidArg, "peer is not bound to a server");
+        }
+        return _owner->set_peer_user_data(*this, data);
+    }
+
+    void* Server::Peer::user_data() const {
+        return _owner ? _owner->peer_user_data(*this) : nullptr;
     }
 
     Server::Server() {
@@ -155,6 +202,22 @@ namespace scn {
         }
     }
 
+    void Server::emit_backpressure(const Peer& peer, Channel channel, U8 type, Result rc) {
+        if (!_on_backpressure) {
+            return;
+        }
+        BackpressureInfo info{};
+        info.code = rc.code;
+        info.channel = channel;
+        info.type = type;
+        info.queued_packets = _pending.size();
+        info.queued_bytes = _pending_bytes;
+        if (auto* session = find_session(peer.conn_id())) {
+            info.send_budget_bytes = session->send_budget_bytes;
+        }
+        _on_backpressure(peer, info);
+    }
+
     Result Server::runtime_status() const {
         auto rc = _ctx ? _ctx->runtime_status() : _runtime.status();
         if (!rc.ok()) {
@@ -163,14 +226,38 @@ namespace scn {
         return crypto_runtime_status();
     }
 
+    Server::Peer Server::make_peer(PeerSession& session) {
+        return Peer{ this, session.endpoint, session.conn_id, session.peer_id };
+    }
+
+    Server::Peer Server::make_peer(const PeerSession& session) const {
+        return Peer{ const_cast<Server*>(this), session.endpoint, session.conn_id, session.peer_id };
+    }
+
     void Server::transition_state(PeerSession& session, ConnectionState next) {
         if (session.state == next) {
             return;
         }
+        const ConnectionState previous = session.state;
         session.state = next;
         ++_stats.state_transitions;
         refresh_runtime_stats();
         emit_log(LogLevel::Trace, "server session state transition");
+        Peer peer = make_peer(session);
+        if (_on_peer_state_change) {
+            _on_peer_state_change(peer, previous, next);
+        }
+        if (previous != ConnectionState::Established && next == ConnectionState::Established) {
+            if (_on_peer_connected) {
+                _on_peer_connected(peer);
+            }
+            if (_on_peer_ready) {
+                _on_peer_ready(peer);
+            }
+        }
+        if (previous != ConnectionState::Closed && next == ConnectionState::Closed && _on_peer_disconnected) {
+            _on_peer_disconnected(peer, session.close_reason);
+        }
     }
 
     void Server::refresh_runtime_stats() {
@@ -186,6 +273,11 @@ namespace scn {
         _stats.rtt_variance_ms = 0;
         _stats.current_retransmit_timeout_ms = 0;
         _stats.estimated_loss_per_mille = 0;
+        _stats.congestion_current_rate_bytes_per_second = 0;
+        _stats.congestion_current_window_bytes = 0;
+        _stats.congestion_ack_events = 0;
+        _stats.congestion_loss_events = 0;
+        _stats.congestion_backpressure_events = 0;
 
         for (const auto& [conn_id, session] : _sessions) {
             (void)conn_id;
@@ -194,21 +286,27 @@ namespace scn {
             _stats.current_reassembly_count += session.reassembler.active_count();
             _stats.current_reassembly_memory_bytes += session.reassembler.memory_bytes();
             _stats.current_send_budget_bytes += session.send_budget_bytes;
-            _stats.rtt_latest_ms = std::max<U64>(_stats.rtt_latest_ms,
-                                                 std::max(session.reliable.latest_rtt_ms(),
+            _stats.rtt_latest_ms = (std::max<U64>)(_stats.rtt_latest_ms,
+                                                 (std::max)(session.reliable.latest_rtt_ms(),
                                                           session.ordered_reliable.latest_rtt_ms()));
-            _stats.rtt_smoothed_ms = std::max<U64>(_stats.rtt_smoothed_ms,
-                                                   std::max(session.reliable.smoothed_rtt_ms(),
+            _stats.rtt_smoothed_ms = (std::max<U64>)(_stats.rtt_smoothed_ms,
+                                                   (std::max)(session.reliable.smoothed_rtt_ms(),
                                                             session.ordered_reliable.smoothed_rtt_ms()));
-            _stats.rtt_variance_ms = std::max<U64>(_stats.rtt_variance_ms,
-                                                   std::max(session.reliable.rtt_variance_ms(),
+            _stats.rtt_variance_ms = (std::max<U64>)(_stats.rtt_variance_ms,
+                                                   (std::max)(session.reliable.rtt_variance_ms(),
                                                             session.ordered_reliable.rtt_variance_ms()));
-            _stats.current_retransmit_timeout_ms = std::max<U64>(_stats.current_retransmit_timeout_ms,
-                                                                 std::max(session.reliable.rto_ms(),
+            _stats.current_retransmit_timeout_ms = (std::max<U64>)(_stats.current_retransmit_timeout_ms,
+                                                                 (std::max)(session.reliable.rto_ms(),
                                                                           session.ordered_reliable.rto_ms()));
-            _stats.estimated_loss_per_mille = std::max<U64>(_stats.estimated_loss_per_mille,
-                                                            std::max(session.reliable.loss_per_mille(),
+            _stats.estimated_loss_per_mille = (std::max<U64>)(_stats.estimated_loss_per_mille,
+                                                            (std::max)(session.reliable.loss_per_mille(),
                                                                      session.ordered_reliable.loss_per_mille()));
+            const auto congestion = session.congestion.snapshot();
+            _stats.congestion_current_rate_bytes_per_second += congestion.current_rate_bytes_per_second;
+            _stats.congestion_current_window_bytes += congestion.current_window_bytes;
+            _stats.congestion_ack_events += congestion.ack_events;
+            _stats.congestion_loss_events += congestion.loss_events;
+            _stats.congestion_backpressure_events += congestion.backpressure_events;
         }
     }
 
@@ -821,7 +919,7 @@ namespace scn {
 
     Result Server::send_payload(const Endpoint& to, U64 conn_id, const U8* data, ST len) {
         PeerSession* session = find_session(conn_id);
-        if (!session || session->endpoint.to_string() != to.to_string()) {
+        if (!session || session->endpoint != to) {
             return Result::fail(Errc::Closed, "unknown peer session");
         }
         if (session->state != ConnectionState::Established) {
@@ -851,7 +949,7 @@ namespace scn {
 
     Result Server::send(const Peer& peer, const SendOptions& options, U8 type, std::span<const U8> payload) {
         PeerSession* session = find_session(peer.conn_id());
-        if (!session || session->endpoint.to_string() != peer.endpoint().to_string()) {
+        if (!session || session->endpoint != peer.endpoint()) {
             return Result::fail(Errc::Closed, "unknown peer session");
         }
         if (session->state != ConnectionState::Established) {
@@ -864,14 +962,21 @@ namespace scn {
             return Result::fail(Errc::TooLarge, "message payload too large");
         }
 
+        auto finish = [&](Result rc) {
+            if (!rc.ok() && (rc.code == Errc::QueueFull || rc.code == Errc::Backpressure)) {
+                emit_backpressure(peer, options.channel, type, rc);
+            }
+            return rc;
+        };
+
         const U16 len = static_cast<U16>(payload.size());
         if (len > max_inline_payload_for_channel(options.channel)) {
-            return send_fragmented(*session, options, type, payload);
+            return finish(send_fragmented(*session, options, type, payload));
         }
 
         if (options.channel == Channel::Reliable) {
-            return send_reliable_message(*session, Channel::Reliable, type, payload.data(), len,
-                                         options.priority, options.lifetime_ms);
+            return finish(send_reliable_message(*session, Channel::Reliable, type, payload.data(), len,
+                                                options.priority, options.lifetime_ms));
         }
         if (options.channel == Channel::ReliableOrdered) {
             std::array<U8, NetConfig::MaxReliableMessageBytes> ordered_payload{};
@@ -880,9 +985,9 @@ namespace scn {
             if (!rc.ok()) {
                 return rc;
             }
-            return send_reliable_message(*session, Channel::ReliableOrdered, type,
-                                         ordered_payload.data(), static_cast<U16>(writer.off),
-                                         options.priority, options.lifetime_ms);
+            return finish(send_reliable_message(*session, Channel::ReliableOrdered, type,
+                                                ordered_payload.data(), static_cast<U16>(writer.off),
+                                                options.priority, options.lifetime_ms));
         }
         if (options.channel == Channel::SequencedUnreliable) {
             std::array<U8, NetConfig::MaxMessageBytes> sequenced_payload{};
@@ -891,11 +996,11 @@ namespace scn {
             if (!rc.ok()) {
                 return rc;
             }
-            return queue_message_packet(*session, Channel::SequencedUnreliable, type,
-                                        sequenced_payload.data(), static_cast<U16>(writer.off),
-                                        options.priority);
+            return finish(queue_message_packet(*session, Channel::SequencedUnreliable, type,
+                                               sequenced_payload.data(), static_cast<U16>(writer.off),
+                                               options.priority));
         }
-        return queue_message_packet(*session, Channel::Unreliable, type, payload.data(), len, options.priority);
+        return finish(queue_message_packet(*session, Channel::Unreliable, type, payload.data(), len, options.priority));
     }
 
     Result Server::send(const Peer& peer, Channel channel, U8 type, std::span<const U8> payload) {
@@ -903,27 +1008,164 @@ namespace scn {
     }
 
     Result Server::send_text(const Peer& peer, U8 type, std::string_view text) {
+        return send_text(peer, type, text, SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 });
+    }
+
+    Result Server::send_text(const Peer& peer, U8 type, std::string_view text, const SendOptions& options) {
         if (text.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
-            return Result::fail(Errc::InvalidArg, "text payload too large");
+            return Result::fail(Errc::TooLarge, "text payload too large");
         }
-        return send(peer, SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 }, type,
+        return send(peer, options, type,
                     std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()));
+    }
+
+
+    Result Server::send_unreliable(const Peer& peer, U8 type, std::span<const U8> payload, SendPriority priority) {
+        return send(peer, SendOptions{ Channel::Unreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::send_reliable(const Peer& peer, U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return send(peer, SendOptions{ Channel::Reliable, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::send_ordered(const Peer& peer, U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return send(peer, SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::send_latest(const Peer& peer, U8 type, std::span<const U8> payload, SendPriority priority) {
+        return send(peer, SendOptions{ Channel::SequencedUnreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::send_unreliable_text(const Peer& peer, U8 type, std::string_view text, SendPriority priority) {
+        return send_text(peer, type, text, SendOptions{ Channel::Unreliable, priority, 0 });
+    }
+
+    Result Server::send_reliable_text(const Peer& peer, U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return send_text(peer, type, text, SendOptions{ Channel::Reliable, priority, lifetime_ms });
+    }
+
+    Result Server::send_ordered_text(const Peer& peer, U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return send_text(peer, type, text, SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms });
+    }
+
+    Result Server::send_latest_text(const Peer& peer, U8 type, std::string_view text, SendPriority priority) {
+        return send_text(peer, type, text, SendOptions{ Channel::SequencedUnreliable, priority, 0 });
+    }
+
+    Result Server::broadcast(const SendOptions& options, U8 type, std::span<const U8> payload) {
+        Result first_error = Result::success();
+        for (auto& [conn_id, session] : _sessions) {
+            (void)conn_id;
+            if (session.state != ConnectionState::Established) {
+                continue;
+            }
+            auto rc = send(make_peer(session), options, type, payload);
+            if (!rc.ok() && first_error.ok()) {
+                first_error = rc;
+            }
+        }
+        return first_error;
+    }
+
+    Result Server::broadcast_except(const Peer& excluded, const SendOptions& options, U8 type, std::span<const U8> payload) {
+        Result first_error = Result::success();
+        for (auto& [conn_id, session] : _sessions) {
+            (void)conn_id;
+            if (session.state != ConnectionState::Established || session.conn_id == excluded.conn_id()) {
+                continue;
+            }
+            auto rc = send(make_peer(session), options, type, payload);
+            if (!rc.ok() && first_error.ok()) {
+                first_error = rc;
+            }
+        }
+        return first_error;
+    }
+
+    Result Server::broadcast_unreliable(U8 type, std::span<const U8> payload, SendPriority priority) {
+        return broadcast(SendOptions{ Channel::Unreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::broadcast_reliable(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return broadcast(SendOptions{ Channel::Reliable, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::broadcast_ordered(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return broadcast(SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Server::broadcast_latest(U8 type, std::span<const U8> payload, SendPriority priority) {
+        return broadcast(SendOptions{ Channel::SequencedUnreliable, priority, 0 }, type, payload);
+    }
+
+    Result Server::broadcast_unreliable_text(U8 type, std::string_view text, SendPriority priority) {
+        return broadcast_unreliable(type, std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()), priority);
+    }
+
+    Result Server::broadcast_reliable_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return broadcast_reliable(type, std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()), priority, lifetime_ms);
+    }
+
+    Result Server::broadcast_ordered_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return broadcast_ordered(type, std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()), priority, lifetime_ms);
+    }
+
+    Result Server::broadcast_latest_text(U8 type, std::string_view text, SendPriority priority) {
+        return broadcast_latest(type, std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()), priority);
+    }
+
+    void Server::for_each_peer(const std::function<void(Peer)>& fn) const {
+        if (!fn) {
+            return;
+        }
+        for (const auto& [conn_id, session] : _sessions) {
+            (void)conn_id;
+            if (session.state == ConnectionState::Established) {
+                fn(make_peer(session));
+            }
+        }
+    }
+
+    Result Server::set_peer_user_data(const Peer& peer, void* data) {
+        PeerSession* session = find_session(peer.conn_id());
+        if (!session || session->endpoint != peer.endpoint()) {
+            return Result::fail(Errc::Closed, "unknown peer session");
+        }
+        session->user_data = data;
+        return Result::success();
+    }
+
+    void* Server::peer_user_data(const Peer& peer) const {
+        const PeerSession* session = find_session(peer.conn_id());
+        if (!session || session->endpoint != peer.endpoint()) {
+            return nullptr;
+        }
+        return session->user_data;
     }
 
     Result Server::close_peer(const Peer& peer, CloseReason reason) {
         PeerSession* session = find_session(peer.conn_id());
-        if (!session || session->endpoint.to_string() != peer.endpoint().to_string()) {
+        if (!session || session->endpoint != peer.endpoint()) {
             return Result::fail(Errc::Closed, "unknown peer session");
         }
         close_session(*session, reason, true);
         return Result::success();
     }
 
+    ResultT<Endpoint> Server::local_endpoint() const {
+        Endpoint endpoint{};
+        auto rc = local_endpoint(endpoint);
+        if (!rc.ok()) {
+            return ResultT<Endpoint>::fail(rc.code, rc.msg);
+        }
+        return ResultT<Endpoint>::success(endpoint);
+    }
+
     void Server::refill_send_budget(PeerSession& session, U64 now) {
         if (session.last_budget_refill_ms == 0) {
             session.last_budget_refill_ms = now;
             if (session.send_budget_bytes == 0) {
-                session.send_budget_bytes = _config.send_budget_bytes_per_second;
+                session.send_budget_bytes = session.congestion.rate_bytes_per_second();
             }
             return;
         }
@@ -931,10 +1173,10 @@ namespace scn {
             return;
         }
         const U64 elapsed_ms = now - session.last_budget_refill_ms;
-        const U64 refill = (static_cast<U64>(_config.send_budget_bytes_per_second) * elapsed_ms) / 1000;
+        const U64 refill = (session.congestion.rate_bytes_per_second() * elapsed_ms) / 1000;
         if (refill > 0) {
-            const U64 max_bucket = static_cast<U64>(_config.send_budget_bytes_per_second) * 2;
-            session.send_budget_bytes = std::min<U64>(max_bucket, session.send_budget_bytes + refill);
+            const U64 max_bucket = session.congestion.bucket_cap_bytes();
+            session.send_budget_bytes = (std::min<U64>)(max_bucket, session.send_budget_bytes + refill);
             session.last_budget_refill_ms = now;
             ++_stats.send_budget_refills;
         }
@@ -960,6 +1202,8 @@ namespace scn {
                     refill_send_budget(*owner, now);
                     if (owner->send_budget_bytes < static_cast<U64>(it->len)) {
                         budget_blocked = true;
+                        owner->congestion.on_backpressure(now);
+                        owner->send_budget_bytes = (std::min<U64>)(owner->send_budget_bytes, owner->congestion.bucket_cap_bytes());
                         ++it;
                         continue;
                     }
@@ -974,6 +1218,10 @@ namespace scn {
                 if (!rc.ok()) {
                     if (rc.code == Errc::WouldBlock) {
                         ++_stats.would_block_events;
+                        if (owner) {
+                            owner->congestion.on_backpressure(now);
+                            owner->send_budget_bytes = (std::min<U64>)(owner->send_budget_bytes, owner->congestion.bucket_cap_bytes());
+                        }
                         if (budget_blocked) {
                             ++_stats.backpressure_events;
                         }
@@ -1070,15 +1318,32 @@ namespace scn {
                 _stats.reliable_retransmits += after_retransmits - before_retransmits;
             }
             if (after_losses > before_losses) {
-                _stats.reliable_loss_events += after_losses - before_losses;
+                const U64 losses = after_losses - before_losses;
+                _stats.reliable_loss_events += losses;
+                session.congestion.on_loss(now, losses);
+                session.send_budget_bytes = (std::min<U64>)(session.send_budget_bytes, session.congestion.bucket_cap_bytes());
             }
         }
         refresh_runtime_stats();
         return Result::success();
     }
 
+    void Server::emit_message(const Peer& peer, const MsgView& msg) {
+        auto text = _text_handlers.find(msg.type);
+        if (text != _text_handlers.end() && text->second) {
+            text->second(peer, msg.text());
+        }
+        auto binary = _binary_handlers.find(msg.type);
+        if (binary != _binary_handlers.end() && binary->second) {
+            binary->second(peer, msg);
+        }
+        if (_on_message) {
+            _on_message(peer, msg);
+        }
+    }
+
     Result Server::deliver_application_message(PeerSession& session, Channel channel, U8 type, const U8* data, U16 len, U64 delivery_sequence) {
-        Peer peer{ this, session.endpoint, session.conn_id };
+        Peer peer = make_peer(session);
 
         if (channel == Channel::ReliableOrdered) {
             ++_stats.ordered_messages_received;
@@ -1088,14 +1353,12 @@ namespace scn {
             auto rc = session.ordered.accept(delivery_sequence, type, data, len,
                                              [&](U8 delivered_type, const U8* delivered_data, U16 delivered_len) {
                                                  ++released;
-                                                 if (_on_message) {
-                                                     MsgView delivered{};
-                                                     delivered.channel = Channel::ReliableOrdered;
-                                                     delivered.type = delivered_type;
-                                                     delivered.data = delivered_data;
-                                                     delivered.len = delivered_len;
-                                                     _on_message(peer, delivered);
-                                                 }
+                                                 MsgView delivered{};
+                                                 delivered.channel = Channel::ReliableOrdered;
+                                                 delivered.type = delivered_type;
+                                                 delivered.data = delivered_data;
+                                                 delivered.len = delivered_len;
+                                                 emit_message(peer, delivered);
                                                  return Result::success();
                                              },
                                              buffered, stale);
@@ -1123,25 +1386,21 @@ namespace scn {
                 ++_stats.sequenced_messages_dropped;
                 return Result::success();
             }
-            if (_on_message) {
-                MsgView delivered{};
-                delivered.channel = Channel::SequencedUnreliable;
-                delivered.type = type;
-                delivered.data = data;
-                delivered.len = len;
-                _on_message(peer, delivered);
-            }
-            return Result::success();
-        }
-
-        if (_on_message) {
             MsgView delivered{};
-            delivered.channel = channel;
+            delivered.channel = Channel::SequencedUnreliable;
             delivered.type = type;
             delivered.data = data;
             delivered.len = len;
-            _on_message(peer, delivered);
+            emit_message(peer, delivered);
+            return Result::success();
         }
+
+        MsgView delivered{};
+        delivered.channel = channel;
+        delivered.type = type;
+        delivered.data = data;
+        delivered.len = len;
+        emit_message(peer, delivered);
         return Result::success();
     }
 
@@ -1208,9 +1467,11 @@ namespace scn {
                 ReliableSession& reliable = (ack_channel == Channel::ReliableOrdered)
                     ? session.ordered_reliable
                     : session.reliable;
-                const ReliableAckEvent ack = reliable.acknowledge(acked_message_id, now_ms());
+                const U64 ack_now = now_ms();
+                const ReliableAckEvent ack = reliable.acknowledge(acked_message_id, ack_now);
                 if (ack.removed) {
                     ++_stats.reliable_acks_received;
+                    session.congestion.on_ack(ack.rtt_sample_valid, ack.rtt_sample_ms, ack.retransmitted, ack_now);
                 }
                 refresh_runtime_stats();
                 return;
@@ -1421,13 +1682,18 @@ namespace scn {
         PeerSession session{};
         session.endpoint = from;
         session.conn_id = allocate_conn_id();
+        session.peer_id = _next_peer_id++;
+        if (_next_peer_id == 0) {
+            _next_peer_id = 1;
+        }
         session.state = ConnectionState::Idle;
         session.close_reason = CloseReason::Normal;
         session.created_ms = now;
         session.last_recv_ms = now;
         session.last_send_ms = 0;
         session.send_seq = 1;
-        session.send_budget_bytes = _config.send_budget_bytes_per_second;
+        session.congestion.configure(_config.congestion, _config.send_budget_bytes_per_second);
+        session.send_budget_bytes = session.congestion.rate_bytes_per_second();
         session.last_budget_refill_ms = now;
         session.next_fragment_message_id = 1;
         session.next_ordered_sequence = 1;
@@ -1445,7 +1711,7 @@ namespace scn {
         crypto_random_bytes(session.server_nonce.data(), session.server_nonce.size());
 
         ReliabilityConfig reliability = _config.reliability;
-        reliability.max_pending_bytes = std::min<U32>(reliability.max_pending_bytes,
+        reliability.max_pending_bytes = (std::min<U32>)(reliability.max_pending_bytes,
                                                       _config.abuse.max_queued_reliable_bytes_per_peer);
         session.reliable.configure(reliability);
         session.ordered_reliable.configure(reliability);
@@ -1467,7 +1733,7 @@ namespace scn {
         transition_state(session, ConnectionState::Handshaking);
 
         const U64 conn_id = session.conn_id;
-        _endpoint_to_conn[from.to_string()] = conn_id;
+        _endpoint_to_conn[from] = conn_id;
         _sessions.emplace(conn_id, std::move(session));
         refresh_runtime_stats();
 
@@ -1613,7 +1879,7 @@ namespace scn {
                 rc = Result::fail(Errc::ProtocolError, "secure packet missing conn_id");
             } else {
                 PeerSession* session = find_session(packet.h.conn_id);
-                if (!session || session->endpoint.to_string() != from.to_string()) {
+                if (!session || session->endpoint != from) {
                     rc = Result::fail(Errc::Closed, "unknown session");
                     (void)queue_close_packet(from, packet.h.conn_id, CloseReason::UnknownConnection,
                                              false, nullptr, _stateless_seq++, SendPriority::High, 0);
@@ -1683,7 +1949,7 @@ namespace scn {
         if (it == _sessions.end()) {
             return;
         }
-        _endpoint_to_conn.erase(it->second.endpoint.to_string());
+        _endpoint_to_conn.erase(it->second.endpoint);
         it->second.keys.clear();
         it->second.ephemeral.clear();
         it->second.reliable.clear();
@@ -1739,7 +2005,7 @@ namespace scn {
     }
 
     Server::PeerSession* Server::find_session_by_endpoint(const Endpoint& endpoint) {
-        auto it = _endpoint_to_conn.find(endpoint.to_string());
+        auto it = _endpoint_to_conn.find(endpoint);
         if (it == _endpoint_to_conn.end()) {
             return nullptr;
         }

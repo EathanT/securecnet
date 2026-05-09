@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <chrono>
 
 #include "securecnet/result.hpp"
 #include "securecnet/util/util.h"
@@ -97,6 +98,20 @@ namespace scn {
         U64 reassembly_timeout_ms{ 1500 };
     };
 
+    struct CongestionControlConfig {
+        bool enabled{ false };
+        U32 min_rate_bytes_per_second{ 32 * 1024 };
+        U32 initial_rate_bytes_per_second{ 0 }; // 0 = half of send_budget_bytes_per_second, clamped.
+        U32 max_rate_bytes_per_second{ 0 };     // 0 = send_budget_bytes_per_second.
+        U32 additive_increase_bytes_per_ack{ static_cast<U32>(NetConfig::MaxPacketBytes) };
+        U32 multiplicative_decrease_per_mille{ 700 };
+        U32 backpressure_decrease_per_mille{ 850 };
+        U32 min_window_bytes{ static_cast<U32>(NetConfig::MaxPacketBytes * 4) };
+        U32 max_window_bytes{ 0 };              // 0 = two seconds of max_rate_bytes_per_second.
+        U64 loss_cooldown_ms{ 100 };
+        U64 backpressure_cooldown_ms{ 250 };
+    };
+
     struct AbuseConfig {
         U32 per_ip_handshake_rate_limit_per_second{ 64 };
         U32 invalid_packet_ban_threshold{ 16 };
@@ -111,6 +126,7 @@ namespace scn {
     struct ClientConfig {
         ReliabilityConfig reliability{};
         FragmentationConfig fragmentation{};
+        CongestionControlConfig congestion{};
         U64 handshake_timeout_ms{ NetConfig::HandshakeTimeoutMs };
         U64 idle_timeout_ms{ NetConfig::IdleTimeoutMs };
         U64 keepalive_interval_ms{ NetConfig::KeepaliveIntervalMs };
@@ -119,12 +135,19 @@ namespace scn {
         U32 send_budget_bytes_per_second{ 128 * 1024 };
         bool enable_session_resumption{ true };
         bool enable_packet_debug_dumps{ false };
-        bool single_threaded_event_loop{ true };
+
+        struct Builder;
+
+        static ClientConfig low_latency();
+        static ClientConfig reliable_gameplay();
+        static ClientConfig bulk_transfer();
+        static Builder builder();
     };
 
     struct ServerConfig {
         ReliabilityConfig reliability{};
         FragmentationConfig fragmentation{};
+        CongestionControlConfig congestion{};
         AbuseConfig abuse{};
         U64 handshake_timeout_ms{ NetConfig::HandshakeTimeoutMs };
         U64 idle_timeout_ms{ NetConfig::IdleTimeoutMs };
@@ -135,8 +158,156 @@ namespace scn {
         ST max_peer_sessions{ NetConfig::MaxPeerSessions };
         bool enable_session_resumption{ true };
         bool enable_packet_debug_dumps{ false };
-        bool single_threaded_event_loop{ true };
+
+        struct Builder;
+
+        static ServerConfig public_internet();
+        static ServerConfig lan_only();
+        static ServerConfig bulk_transfer();
+        static Builder builder();
     };
+
+    struct ClientConfig::Builder {
+        ClientConfig cfg{};
+
+        Builder& reliability_config(const ReliabilityConfig& value) { cfg.reliability = value; return *this; }
+        Builder& fragmentation_config(const FragmentationConfig& value) { cfg.fragmentation = value; return *this; }
+        Builder& congestion_control_config(const CongestionControlConfig& value) { cfg.congestion = value; return *this; }
+        Builder& adaptive_congestion_control(bool enabled = true) { cfg.congestion.enabled = enabled; return *this; }
+        Builder& handshake_timeout_ms(U64 value) { cfg.handshake_timeout_ms = value; return *this; }
+        Builder& idle_timeout_ms(U64 value) { cfg.idle_timeout_ms = value; return *this; }
+        Builder& keepalive_interval_ms(U64 value) { cfg.keepalive_interval_ms = value; return *this; }
+        Builder& close_drain_ms(U64 value) { cfg.close_drain_ms = value; return *this; }
+        Builder& max_pending_packets(U32 value) { cfg.max_pending_packets = value; return *this; }
+        Builder& send_budget_bytes_per_second(U32 value) { cfg.send_budget_bytes_per_second = value; return *this; }
+        Builder& session_resumption(bool enabled) { cfg.enable_session_resumption = enabled; return *this; }
+        Builder& packet_debug_dumps(bool enabled) { cfg.enable_packet_debug_dumps = enabled; return *this; }
+        Builder& max_pending_reliable_messages(U32 value) { cfg.reliability.max_pending_messages = value; return *this; }
+        Builder& max_inflight_reliable_messages(U32 value) { cfg.reliability.max_inflight_messages = value; return *this; }
+        Builder& max_pending_reliable_bytes(U32 value) { cfg.reliability.max_pending_bytes = value; return *this; }
+        Builder& ordered_receive_window(U32 value) { cfg.reliability.ordered_receive_window = value; return *this; }
+        Builder& rto_ms(U64 initial, U64 min_value, U64 max_value) {
+            cfg.reliability.initial_rto_ms = initial;
+            cfg.reliability.min_rto_ms = min_value;
+            cfg.reliability.max_rto_ms = max_value;
+            return *this;
+        }
+        Builder& fragmentation_enabled(bool enabled) { cfg.fragmentation.enabled = enabled; return *this; }
+        Builder& max_reassembled_message_bytes(U32 value) { cfg.fragmentation.max_reassembled_message_bytes = value; return *this; }
+        ClientConfig build() const { return cfg; }
+    };
+
+    struct ServerConfig::Builder {
+        ServerConfig cfg{};
+
+        Builder& reliability_config(const ReliabilityConfig& value) { cfg.reliability = value; return *this; }
+        Builder& fragmentation_config(const FragmentationConfig& value) { cfg.fragmentation = value; return *this; }
+        Builder& congestion_control_config(const CongestionControlConfig& value) { cfg.congestion = value; return *this; }
+        Builder& adaptive_congestion_control(bool enabled = true) { cfg.congestion.enabled = enabled; return *this; }
+        Builder& abuse_config(const AbuseConfig& value) { cfg.abuse = value; return *this; }
+        Builder& handshake_timeout_ms(U64 value) { cfg.handshake_timeout_ms = value; return *this; }
+        Builder& idle_timeout_ms(U64 value) { cfg.idle_timeout_ms = value; return *this; }
+        Builder& keepalive_interval_ms(U64 value) { cfg.keepalive_interval_ms = value; return *this; }
+        Builder& close_drain_ms(U64 value) { cfg.close_drain_ms = value; return *this; }
+        Builder& max_pending_packets(U32 value) { cfg.max_pending_packets = value; return *this; }
+        Builder& send_budget_bytes_per_second(U32 value) { cfg.send_budget_bytes_per_second = value; return *this; }
+        Builder& max_peer_sessions(ST value) { cfg.max_peer_sessions = value; return *this; }
+        Builder& session_resumption(bool enabled) { cfg.enable_session_resumption = enabled; return *this; }
+        Builder& packet_debug_dumps(bool enabled) { cfg.enable_packet_debug_dumps = enabled; return *this; }
+        Builder& max_pending_reliable_messages(U32 value) { cfg.reliability.max_pending_messages = value; return *this; }
+        Builder& max_inflight_reliable_messages(U32 value) { cfg.reliability.max_inflight_messages = value; return *this; }
+        Builder& max_pending_reliable_bytes(U32 value) { cfg.reliability.max_pending_bytes = value; cfg.abuse.max_queued_reliable_bytes_per_peer = (std::max)(cfg.abuse.max_queued_reliable_bytes_per_peer, value); return *this; }
+        Builder& ordered_receive_window(U32 value) { cfg.reliability.ordered_receive_window = value; return *this; }
+        Builder& fragmentation_enabled(bool enabled) { cfg.fragmentation.enabled = enabled; return *this; }
+        Builder& max_reassembled_message_bytes(U32 value) { cfg.fragmentation.max_reassembled_message_bytes = value; return *this; }
+        Builder& max_total_reassembly_memory_server(U64 value) { cfg.abuse.max_total_reassembly_memory_server = value; return *this; }
+        ServerConfig build() const { return cfg; }
+    };
+
+    inline ClientConfig ClientConfig::low_latency() {
+        ClientConfig cfg{};
+        cfg.reliability.initial_rto_ms = 80;
+        cfg.reliability.min_rto_ms = 25;
+        cfg.reliability.max_rto_ms = 750;
+        cfg.reliability.max_inflight_messages = 16;
+        cfg.fragmentation.max_reassembled_message_bytes = 8 * 1024;
+        cfg.send_budget_bytes_per_second = 192 * 1024;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 48 * 1024;
+        return cfg;
+    }
+
+    inline ClientConfig ClientConfig::reliable_gameplay() {
+        ClientConfig cfg{};
+        cfg.reliability.max_inflight_messages = 48;
+        cfg.reliability.ordered_receive_window = 128;
+        cfg.reliability.max_pending_messages = 512;
+        cfg.reliability.max_pending_bytes = 128 * 1024;
+        cfg.send_budget_bytes_per_second = 256 * 1024;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 64 * 1024;
+        return cfg;
+    }
+
+    inline ClientConfig ClientConfig::bulk_transfer() {
+        ClientConfig cfg{};
+        cfg.reliability.initial_rto_ms = 180;
+        cfg.reliability.max_inflight_messages = 96;
+        cfg.reliability.max_pending_messages = 1024;
+        cfg.reliability.max_pending_bytes = 512 * 1024;
+        cfg.fragmentation.max_reassembled_message_bytes = 60 * 1024;
+        cfg.fragmentation.max_fragments_per_message = 64;
+        cfg.fragmentation.max_total_reassembly_memory_per_peer = 512 * 1024;
+        cfg.send_budget_bytes_per_second = 1024 * 1024;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 128 * 1024;
+        return cfg;
+    }
+
+    inline ClientConfig::Builder ClientConfig::builder() { return {}; }
+
+    inline ServerConfig ServerConfig::public_internet() {
+        ServerConfig cfg{};
+        cfg.abuse.per_ip_handshake_rate_limit_per_second = 48;
+        cfg.abuse.invalid_packet_ban_threshold = 12;
+        cfg.abuse.invalid_packet_ban_ms = 10000;
+        cfg.abuse.max_sessions_per_ip = 32;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 64 * 1024;
+        return cfg;
+    }
+
+    inline ServerConfig ServerConfig::lan_only() {
+        ServerConfig cfg{};
+        cfg.abuse.per_ip_handshake_rate_limit_per_second = 256;
+        cfg.abuse.invalid_packet_ban_threshold = 64;
+        cfg.abuse.max_sessions_per_ip = 256;
+        cfg.abuse.anti_amplification_slack_bytes = 2048;
+        cfg.max_peer_sessions = 4096;
+        cfg.send_budget_bytes_per_second = 1024 * 1024;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 128 * 1024;
+        return cfg;
+    }
+
+    inline ServerConfig ServerConfig::bulk_transfer() {
+        ServerConfig cfg{};
+        cfg.reliability.initial_rto_ms = 180;
+        cfg.reliability.max_inflight_messages = 96;
+        cfg.reliability.max_pending_messages = 1024;
+        cfg.reliability.max_pending_bytes = 512 * 1024;
+        cfg.fragmentation.max_reassembled_message_bytes = 60 * 1024;
+        cfg.fragmentation.max_fragments_per_message = 64;
+        cfg.fragmentation.max_total_reassembly_memory_per_peer = 512 * 1024;
+        cfg.abuse.max_queued_reliable_bytes_per_peer = 512 * 1024;
+        cfg.abuse.max_total_reassembly_memory_server = 32 * 1024 * 1024;
+        cfg.send_budget_bytes_per_second = 2 * 1024 * 1024;
+        cfg.congestion.enabled = true;
+        cfg.congestion.min_rate_bytes_per_second = 256 * 1024;
+        return cfg;
+    }
+
+    inline ServerConfig::Builder ServerConfig::builder() { return {}; }
 
     inline Result validate_reliability_config(const ReliabilityConfig& cfg) {
         if (cfg.initial_rto_ms == 0 || cfg.min_rto_ms == 0 || cfg.max_rto_ms == 0) {
@@ -184,12 +355,50 @@ namespace scn {
         return Result::success();
     }
 
+    inline Result validate_congestion_control_config(const CongestionControlConfig& cfg, U32 send_budget_bytes_per_second) {
+        if (!cfg.enabled) {
+            return Result::success();
+        }
+        if (send_budget_bytes_per_second == 0) {
+            return Result::fail(Errc::InvalidArg, "send budget must be non-zero for congestion control");
+        }
+        const U32 max_rate = cfg.max_rate_bytes_per_second == 0
+            ? send_budget_bytes_per_second
+            : cfg.max_rate_bytes_per_second;
+        if (cfg.min_rate_bytes_per_second == 0 || max_rate == 0 || cfg.min_rate_bytes_per_second > max_rate) {
+            return Result::fail(Errc::InvalidArg, "congestion rate bounds are invalid");
+        }
+        if (cfg.initial_rate_bytes_per_second != 0 &&
+            (cfg.initial_rate_bytes_per_second < cfg.min_rate_bytes_per_second || cfg.initial_rate_bytes_per_second > max_rate)) {
+            return Result::fail(Errc::InvalidArg, "initial congestion rate is outside configured bounds");
+        }
+        if (cfg.additive_increase_bytes_per_ack == 0 ||
+            cfg.multiplicative_decrease_per_mille == 0 || cfg.multiplicative_decrease_per_mille > 1000 ||
+            cfg.backpressure_decrease_per_mille == 0 || cfg.backpressure_decrease_per_mille > 1000) {
+            return Result::fail(Errc::InvalidArg, "congestion control gain values are invalid");
+        }
+        if (cfg.min_window_bytes < NetConfig::MaxPacketBytes) {
+            return Result::fail(Errc::InvalidArg, "congestion window must hold at least one packet");
+        }
+        if (cfg.max_window_bytes != 0 && cfg.max_window_bytes < cfg.min_window_bytes) {
+            return Result::fail(Errc::InvalidArg, "congestion window bounds are invalid");
+        }
+        if (cfg.loss_cooldown_ms == 0 || cfg.backpressure_cooldown_ms == 0) {
+            return Result::fail(Errc::InvalidArg, "congestion cooldowns must be non-zero");
+        }
+        return Result::success();
+    }
+
     inline Result validate_client_config(const ClientConfig& cfg) {
         auto rc = validate_reliability_config(cfg.reliability);
         if (!rc.ok()) {
             return rc;
         }
         rc = validate_fragmentation_config(cfg.fragmentation);
+        if (!rc.ok()) {
+            return rc;
+        }
+        rc = validate_congestion_control_config(cfg.congestion, cfg.send_budget_bytes_per_second);
         if (!rc.ok()) {
             return rc;
         }
@@ -214,6 +423,10 @@ namespace scn {
             return rc;
         }
         rc = validate_fragmentation_config(cfg.fragmentation);
+        if (!rc.ok()) {
+            return rc;
+        }
+        rc = validate_congestion_control_config(cfg.congestion, cfg.send_budget_bytes_per_second);
         if (!rc.ok()) {
             return rc;
         }

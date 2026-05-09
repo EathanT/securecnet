@@ -1,6 +1,7 @@
 #include "securecnet/io_context.hpp"
 
 #include <algorithm>
+#include <exception>
 
 namespace scn {
 
@@ -16,15 +17,28 @@ namespace scn {
 	}
 	
 	void IoContext::post(std::function<void()> fn) {
+		(void)try_post(std::move(fn));
+	}
+
+	Result IoContext::try_post(std::function<void()> fn) {
 		if (!fn) {
-			return;
+			return Result::fail(Errc::InvalidArg, "posted callback is empty");
 		}
 
 		{
 			std::lock_guard<std::mutex> lock(_mutex);
+			if (_config.max_posted_callbacks != 0 && _posted.size() >= _config.max_posted_callbacks) {
+				return Result::fail(Errc::QueueFull, "IoContext posted callback queue is full");
+			}
 			_posted.push_back(std::move(fn));
 		}
 		_cv.notify_one();
+		return Result::success();
+	}
+
+	ST IoContext::posted_count() const {
+		std::lock_guard<std::mutex> lock(_mutex);
+		return _posted.size();
 	}
 
 	void IoContext::register_service(IoContextService* service) {
@@ -62,7 +76,13 @@ namespace scn {
 			}
 
 			if (fn) {
-				fn();
+				try {
+					fn();
+				} catch (const std::exception& e) {
+					return Result::fail(Errc::Internal, e.what());
+				} catch (...) {
+					return Result::fail(Errc::Internal, "posted callback threw");
+				}
 			}
 		}
 

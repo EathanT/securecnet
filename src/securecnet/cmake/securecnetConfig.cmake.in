@@ -1,0 +1,20 @@
+@PACKAGE_INIT@
+
+find_path(SODIUM_INCLUDE_DIR NAMES sodium.h)
+find_library(SODIUM_LIBRARY NAMES sodium libsodium libsodium.so.23 libsodium.dylib sodium.lib libsodium.lib)
+
+if(NOT SODIUM_INCLUDE_DIR OR NOT SODIUM_LIBRARY)
+  set(securecnet_FOUND FALSE)
+  set(securecnet_NOT_FOUND_MESSAGE "securecnet requires libsodium headers and library. Set SODIUM_INCLUDE_DIR and SODIUM_LIBRARY, or install libsodium development files.")
+  return()
+endif()
+
+if(NOT TARGET securecnet_libsodium)
+  add_library(securecnet_libsodium UNKNOWN IMPORTED)
+  set_target_properties(securecnet_libsodium PROPERTIES
+    IMPORTED_LOCATION "${SODIUM_LIBRARY}"
+    INTERFACE_INCLUDE_DIRECTORIES "${SODIUM_INCLUDE_DIR}"
+  )
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/securecnetTargets.cmake")

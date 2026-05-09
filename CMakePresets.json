@@ -15,8 +15,7 @@
         "SECURECNET_BUILD_DEMO": "ON",
         "SECURECNET_BUILD_EXAMPLES": "ON",
         "SECURECNET_BUILD_BENCHMARKS": "ON",
-        "SECURECNET_WARNINGS_AS_ERRORS": "ON",
-        "SECURECNET_LIBSODIUM_ROOT": "${sourceDir}/external/libsodium"
+        "SECURECNET_WARNINGS_AS_ERRORS": "ON"
       },
       "condition": {
         "type": "equals",

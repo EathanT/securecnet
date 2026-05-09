@@ -31,14 +31,14 @@ static int run_server(const char* port) {
 
     std::printf("secure echo server listening on %s\n", local.to_string().c_str());
 
-    srv.on_message([&](Server::Peer peer, const MsgView& msg) {
-        std::printf("[server] conn=%llu channel=%u type=%u len=%u\n",
+    ServerRouter router;
+    router.on_text(kEchoType, [&](Server::Peer peer, std::string_view text) {
+        std::printf("[server] conn=%llu echo len=%zu\n",
                     static_cast<unsigned long long>(peer.conn_id()),
-                    static_cast<unsigned>(msg.channel),
-                    static_cast<unsigned>(msg.type),
-                    static_cast<unsigned>(msg.len));
-        (void)peer.send(Channel::ReliableOrdered, kEchoType, msg.bytes());
+                    text.size());
+        return peer.send_ordered_text(kEchoType, text);
     });
+    router.attach(srv);
 
     while (true) {
         rc = srv.tick();
@@ -56,33 +56,28 @@ static int run_client(const char* host, const char* port, const char* message) {
         return scn_examples::print_result("client.connect", rc);
     }
 
-    bool sent = false;
     bool got_echo = false;
     std::string echoed{};
 
-    cli.on_message([&](const MsgView& msg) {
-        if (msg.type == kEchoType) {
-            echoed.assign(msg.text());
-            got_echo = true;
+    ClientRouter router;
+    router.on_text(kEchoType, [&](std::string_view text) {
+        echoed.assign(text);
+        got_echo = true;
+    });
+    router.attach(cli);
+
+    cli.on_connected([&] {
+        auto send_rc = cli.send_ordered_text(kEchoType, message);
+        if (!send_rc.ok()) {
+            std::printf("send failed: err=%u msg=%.*s\n",
+                        static_cast<unsigned>(send_rc.code),
+                        static_cast<int>(send_rc.msg.size()),
+                        send_rc.msg.data());
         }
+        (void)send_rc;
     });
 
     const bool completed = scn_examples::pump_until(cli, 2500, [&] {
-        if (!sent && cli.state() == ConnectionState::Established) {
-            SendOptions options{};
-            options.channel = Channel::ReliableOrdered;
-            auto send_rc = cli.send(options,
-                                    kEchoType,
-                                    std::span<const U8>(reinterpret_cast<const U8*>(message), std::strlen(message)));
-            if (!send_rc.ok()) {
-                std::printf("send failed: err=%u msg=%.*s\n",
-                            static_cast<unsigned>(send_rc.code),
-                            static_cast<int>(send_rc.msg.size()),
-                            send_rc.msg.data());
-                return true;
-            }
-            sent = true;
-        }
         return got_echo || cli.state() == ConnectionState::Closed;
     });
 

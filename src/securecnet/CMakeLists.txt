@@ -1,4 +1,9 @@
-add_library(securecnet STATIC
+set(_securecnet_library_type STATIC)
+if(SECURECNET_BUILD_SHARED)
+  set(_securecnet_library_type SHARED)
+endif()
+
+add_library(securecnet ${_securecnet_library_type}
   lib/socket_init.cpp
   lib/address.cpp
   lib/endpoint.cpp
@@ -15,7 +20,7 @@ add_library(securecnet::securecnet ALIAS securecnet)
 
 set(SECURECNET_LIBSODIUM_ROOT
   "${CMAKE_SOURCE_DIR}/external/libsodium"
-  CACHE PATH "Root of extracted libsodium"
+  CACHE PATH "Optional root of an extracted libsodium SDK"
 )
 
 set(_sodium_include_hints)
@@ -32,6 +37,11 @@ if(SECURECNET_LIBSODIUM_ROOT)
     "${SECURECNET_LIBSODIUM_ROOT}"
     "${SECURECNET_LIBSODIUM_ROOT}/libsodium"
   )
+endif()
+
+set(_securecnet_header_only_sodium "${CMAKE_SOURCE_DIR}/external/libsodium")
+if(EXISTS "${_securecnet_header_only_sodium}/include/sodium.h")
+  list(APPEND _sodium_include_hints "${_securecnet_header_only_sodium}")
 endif()
 
 find_package(PkgConfig QUIET)
@@ -155,3 +165,47 @@ if(WIN32)
     target_compile_definitions(securecnet PUBLIC SODIUM_STATIC=1)
   endif()
 endif()
+
+
+include(CMakePackageConfigHelpers)
+include(GNUInstallDirs)
+
+set_target_properties(securecnet PROPERTIES
+  EXPORT_NAME securecnet
+)
+
+install(TARGETS securecnet
+  EXPORT securecnetTargets
+  ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(DIRECTORY ${_securecnet_public_include_dir}/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+set(_securecnet_config_dir ${CMAKE_CURRENT_BINARY_DIR}/cmake)
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/securecnetConfig.cmake.in
+  ${_securecnet_config_dir}/securecnetConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/securecnet
+)
+
+write_basic_package_version_file(
+  ${_securecnet_config_dir}/securecnetConfigVersion.cmake
+  VERSION 0.3.0
+  COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+  ${_securecnet_config_dir}/securecnetConfig.cmake
+  ${_securecnet_config_dir}/securecnetConfigVersion.cmake
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/securecnet
+)
+
+install(EXPORT securecnetTargets
+  NAMESPACE securecnet::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/securecnet
+)

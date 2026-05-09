@@ -46,7 +46,7 @@ namespace scn {
         }
         const U16 offset = static_cast<U16>(fragment_index * NetConfig::MaxFragmentDataBytes);
         const U16 remaining = static_cast<U16>(original_length - offset);
-        return static_cast<U16>(std::min<U16>(remaining, NetConfig::MaxFragmentDataBytes));
+        return static_cast<U16>((std::min<U16>)(remaining, NetConfig::MaxFragmentDataBytes));
     }
 
     inline Result write_fragment_payload(ByteWriter& w,

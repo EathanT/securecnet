@@ -51,3 +51,24 @@ using ST = std::size_t;
 #define B8_TRUE 1
 #define B8_FALSE 0
 
+
+namespace scn {
+    using ::I8;
+    using ::U8;
+    using ::I16;
+    using ::U16;
+    using ::I32;
+    using ::U32;
+    using ::I64;
+    using ::U64;
+    using ::UPtr;
+    using ::Byte;
+    using ::F32;
+    using ::F64;
+    using ::B8;
+    using ::B32;
+    using ::Flags32;
+    using ::Flags16;
+    using ::Flags8;
+    using ::ST;
+} // namespace scn

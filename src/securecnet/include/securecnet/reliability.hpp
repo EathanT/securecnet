@@ -385,7 +385,7 @@ namespace scn {
                     if (_inflight_count > 0) {
                         --_inflight_count;
                     }
-                    pending.rto_ms = std::min<U64>(_cfg.max_rto_ms, std::max<U64>(_cfg.min_rto_ms, pending.rto_ms * 2));
+                    pending.rto_ms = (std::min<U64>)(_cfg.max_rto_ms, (std::max<U64>)(_cfg.min_rto_ms, pending.rto_ms * 2));
                 }
 
                 if (_inflight_count >= _cfg.max_inflight_messages) {
@@ -550,19 +550,19 @@ namespace scn {
             if (!_have_rtt) {
                 _have_rtt = true;
                 _srtt_ms = sample_ms;
-                _rttvar_ms = std::max<U64>(1, sample_ms / 2);
+                _rttvar_ms = (std::max<U64>)(1, sample_ms / 2);
             } else {
                 const U64 abs_delta = (_srtt_ms > sample_ms) ? (_srtt_ms - sample_ms) : (sample_ms - _srtt_ms);
                 _rttvar_ms = ((_rttvar_ms * 3) + abs_delta) / 4;
                 _srtt_ms = ((_srtt_ms * 7) + sample_ms) / 8;
             }
-            const U64 penalty = std::max<U64>(1, _rttvar_ms * 4);
+            const U64 penalty = (std::max<U64>)(1, _rttvar_ms * 4);
             _rto_ms = std::clamp<U64>(_srtt_ms + penalty, _cfg.min_rto_ms, _cfg.max_rto_ms);
         }
 
         void update_loss_estimate() {
-            const U64 denom = std::max<U64>(1, _loss_events + (_next_message_id - 1));
-            _loss_per_mille = std::min<U64>(1000, (_loss_events * 1000) / denom);
+            const U64 denom = (std::max<U64>)(1, _loss_events + (_next_message_id - 1));
+            _loss_per_mille = (std::min<U64>)(1000, (_loss_events * 1000) / denom);
         }
 
         ReliabilityConfig _cfg{};

@@ -98,7 +98,8 @@ namespace scn {
         _ordered_reliable.configure(_config.reliability);
         _ordered.set_max_buffered(_config.reliability.ordered_receive_window);
         _reassembler.configure(_config.fragmentation);
-        _send_budget_bytes = _config.send_budget_bytes_per_second;
+        _congestion.configure(_config.congestion, _config.send_budget_bytes_per_second);
+        _send_budget_bytes = _congestion.rate_bytes_per_second();
         _last_budget_refill_ms = now_ms();
         refresh_runtime_stats();
     }
@@ -108,7 +109,8 @@ namespace scn {
         _ordered_reliable.configure(_config.reliability);
         _ordered.set_max_buffered(_config.reliability.ordered_receive_window);
         _reassembler.configure(_config.fragmentation);
-        _send_budget_bytes = _config.send_budget_bytes_per_second;
+        _congestion.configure(_config.congestion, _config.send_budget_bytes_per_second);
+        _send_budget_bytes = _congestion.rate_bytes_per_second();
         _last_budget_refill_ms = now_ms();
         refresh_runtime_stats();
     }
@@ -147,6 +149,20 @@ namespace scn {
         }
     }
 
+    void Client::emit_backpressure(Channel channel, U8 type, Result rc) {
+        if (!_on_backpressure) {
+            return;
+        }
+        BackpressureInfo info{};
+        info.code = rc.code;
+        info.channel = channel;
+        info.type = type;
+        info.queued_packets = _pending.size();
+        info.queued_bytes = _pending_bytes;
+        info.send_budget_bytes = _send_budget_bytes;
+        _on_backpressure(info);
+    }
+
     Result Client::runtime_status() const {
         auto rc = _ctx ? _ctx->runtime_status() : _runtime.status();
         if (!rc.ok()) {
@@ -159,10 +175,20 @@ namespace scn {
         if (_state == next) {
             return;
         }
+        const ConnectionState previous = _state;
         _state = next;
         ++_stats.state_transitions;
         refresh_runtime_stats();
         emit_log(LogLevel::Trace, "client state transition");
+        if (_on_state_change) {
+            _on_state_change(previous, next);
+        }
+        if (previous != ConnectionState::Established && next == ConnectionState::Established && _on_connected) {
+            _on_connected();
+        }
+        if (previous != ConnectionState::Closed && next == ConnectionState::Closed && _on_disconnected) {
+            _on_disconnected(_close_reason);
+        }
     }
 
     void Client::refresh_runtime_stats() {
@@ -174,15 +200,21 @@ namespace scn {
         _stats.current_reassembly_memory_bytes = _reassembler.memory_bytes();
         _stats.current_send_budget_bytes = _send_budget_bytes;
 
-        const U64 primary_latest = std::max(_reliable.latest_rtt_ms(), _ordered_reliable.latest_rtt_ms());
-        const U64 primary_srtt = std::max(_reliable.smoothed_rtt_ms(), _ordered_reliable.smoothed_rtt_ms());
-        const U64 primary_rttvar = std::max(_reliable.rtt_variance_ms(), _ordered_reliable.rtt_variance_ms());
-        const U64 primary_rto = std::max(_reliable.rto_ms(), _ordered_reliable.rto_ms());
+        const U64 primary_latest = (std::max)(_reliable.latest_rtt_ms(), _ordered_reliable.latest_rtt_ms());
+        const U64 primary_srtt = (std::max)(_reliable.smoothed_rtt_ms(), _ordered_reliable.smoothed_rtt_ms());
+        const U64 primary_rttvar = (std::max)(_reliable.rtt_variance_ms(), _ordered_reliable.rtt_variance_ms());
+        const U64 primary_rto = (std::max)(_reliable.rto_ms(), _ordered_reliable.rto_ms());
         _stats.rtt_latest_ms = primary_latest;
         _stats.rtt_smoothed_ms = primary_srtt;
         _stats.rtt_variance_ms = primary_rttvar;
         _stats.current_retransmit_timeout_ms = primary_rto;
-        _stats.estimated_loss_per_mille = std::max(_reliable.loss_per_mille(), _ordered_reliable.loss_per_mille());
+        _stats.estimated_loss_per_mille = (std::max)(_reliable.loss_per_mille(), _ordered_reliable.loss_per_mille());
+        const auto congestion = _congestion.snapshot();
+        _stats.congestion_current_rate_bytes_per_second = congestion.current_rate_bytes_per_second;
+        _stats.congestion_current_window_bytes = congestion.current_window_bytes;
+        _stats.congestion_ack_events = congestion.ack_events;
+        _stats.congestion_loss_events = congestion.loss_events;
+        _stats.congestion_backpressure_events = congestion.backpressure_events;
     }
 
     void Client::reset_session() {
@@ -192,7 +224,8 @@ namespace scn {
         _last_recv_ms = 0;
         _last_send_ms = 0;
         _pending_bytes = 0;
-        _send_budget_bytes = _config.send_budget_bytes_per_second;
+        _congestion.reset_runtime();
+        _send_budget_bytes = _congestion.rate_bytes_per_second();
         _last_budget_refill_ms = now_ms();
         _next_fragment_message_id = 1;
         _next_ordered_sequence = 1;
@@ -223,6 +256,9 @@ namespace scn {
             ++_stats.handshake_failures;
         }
         emit_log(LogLevel::Error, msg ? std::string_view(msg) : std::string_view{});
+        if (_on_error) {
+            _on_error(Result::fail(Errc::Closed, msg ? std::string_view(msg) : std::string_view{}));
+        }
         _close_reason = reason;
         _pending.clear();
         _pending_bytes = 0;
@@ -407,7 +443,7 @@ namespace scn {
         if (_last_budget_refill_ms == 0) {
             _last_budget_refill_ms = now;
             if (_send_budget_bytes == 0) {
-                _send_budget_bytes = _config.send_budget_bytes_per_second;
+                _send_budget_bytes = _congestion.rate_bytes_per_second();
             }
             return;
         }
@@ -415,10 +451,10 @@ namespace scn {
             return;
         }
         const U64 elapsed_ms = now - _last_budget_refill_ms;
-        const U64 refill = (static_cast<U64>(_config.send_budget_bytes_per_second) * elapsed_ms) / 1000;
+        const U64 refill = (_congestion.rate_bytes_per_second() * elapsed_ms) / 1000;
         if (refill > 0) {
-            const U64 max_bucket = static_cast<U64>(_config.send_budget_bytes_per_second) * 2;
-            _send_budget_bytes = std::min<U64>(max_bucket, _send_budget_bytes + refill);
+            const U64 max_bucket = _congestion.bucket_cap_bytes();
+            _send_budget_bytes = (std::min<U64>)(max_bucket, _send_budget_bytes + refill);
             _last_budget_refill_ms = now;
             ++_stats.send_budget_refills;
             refresh_runtime_stats();
@@ -629,14 +665,21 @@ namespace scn {
             return Result::fail(Errc::TooLarge, "message payload too large");
         }
 
+        auto finish = [&](Result rc) {
+            if (!rc.ok() && (rc.code == Errc::QueueFull || rc.code == Errc::Backpressure)) {
+                emit_backpressure(options.channel, type, rc);
+            }
+            return rc;
+        };
+
         const U16 len = static_cast<U16>(payload.size());
         if (len > max_inline_payload_for_channel(options.channel)) {
-            return send_fragmented(options, type, payload);
+            return finish(send_fragmented(options, type, payload));
         }
 
         if (options.channel == Channel::Reliable) {
-            return send_reliable_message(Channel::Reliable, type, payload.data(), len,
-                                         options.priority, options.lifetime_ms);
+            return finish(send_reliable_message(Channel::Reliable, type, payload.data(), len,
+                                                options.priority, options.lifetime_ms));
         }
         if (options.channel == Channel::ReliableOrdered) {
             std::array<U8, NetConfig::MaxReliableMessageBytes> ordered_payload{};
@@ -645,9 +688,9 @@ namespace scn {
             if (!rc.ok()) {
                 return rc;
             }
-            return send_reliable_message(Channel::ReliableOrdered, type,
-                                         ordered_payload.data(), static_cast<U16>(writer.off),
-                                         options.priority, options.lifetime_ms);
+            return finish(send_reliable_message(Channel::ReliableOrdered, type,
+                                                ordered_payload.data(), static_cast<U16>(writer.off),
+                                                options.priority, options.lifetime_ms));
         }
         if (options.channel == Channel::SequencedUnreliable) {
             std::array<U8, NetConfig::MaxMessageBytes> sequenced_payload{};
@@ -656,11 +699,11 @@ namespace scn {
             if (!rc.ok()) {
                 return rc;
             }
-            return queue_message_packet(Channel::SequencedUnreliable, type,
-                                        sequenced_payload.data(), static_cast<U16>(writer.off),
-                                        options.priority);
+            return finish(queue_message_packet(Channel::SequencedUnreliable, type,
+                                               sequenced_payload.data(), static_cast<U16>(writer.off),
+                                               options.priority));
         }
-        return queue_message_packet(Channel::Unreliable, type, payload.data(), len, options.priority);
+        return finish(queue_message_packet(Channel::Unreliable, type, payload.data(), len, options.priority));
     }
 
     Result Client::send(Channel channel, U8 type, std::span<const U8> payload) {
@@ -668,8 +711,57 @@ namespace scn {
     }
 
     Result Client::send_text(U8 type, std::string_view text) {
-        return send(SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 }, type,
+        return send_text(type, text, SendOptions{ Channel::Unreliable, SendPriority::Normal, 0 });
+    }
+
+    Result Client::send_text(U8 type, std::string_view text, const SendOptions& options) {
+        if (text.size() > static_cast<ST>(std::numeric_limits<U16>::max())) {
+            return Result::fail(Errc::TooLarge, "text payload too large");
+        }
+        return send(options, type,
                     std::span<const U8>(reinterpret_cast<const U8*>(text.data()), text.size()));
+    }
+
+    Result Client::send_unreliable(U8 type, std::span<const U8> payload, SendPriority priority) {
+        return send(SendOptions{ Channel::Unreliable, priority, 0 }, type, payload);
+    }
+
+    Result Client::send_reliable(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return send(SendOptions{ Channel::Reliable, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Client::send_ordered(U8 type, std::span<const U8> payload, SendPriority priority, U64 lifetime_ms) {
+        return send(SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms }, type, payload);
+    }
+
+    Result Client::send_latest(U8 type, std::span<const U8> payload, SendPriority priority) {
+        return send(SendOptions{ Channel::SequencedUnreliable, priority, 0 }, type, payload);
+    }
+
+    Result Client::send_unreliable_text(U8 type, std::string_view text, SendPriority priority) {
+        return send_text(type, text, SendOptions{ Channel::Unreliable, priority, 0 });
+    }
+
+    Result Client::send_reliable_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return send_text(type, text, SendOptions{ Channel::Reliable, priority, lifetime_ms });
+    }
+
+    Result Client::send_ordered_text(U8 type, std::string_view text, SendPriority priority, U64 lifetime_ms) {
+        return send_text(type, text, SendOptions{ Channel::ReliableOrdered, priority, lifetime_ms });
+    }
+
+    Result Client::send_latest_text(U8 type, std::string_view text, SendPriority priority) {
+        return send_text(type, text, SendOptions{ Channel::SequencedUnreliable, priority, 0 });
+    }
+
+
+    ResultT<Endpoint> Client::local_endpoint() const {
+        Endpoint endpoint{};
+        auto rc = local_endpoint(endpoint);
+        if (!rc.ok()) {
+            return ResultT<Endpoint>::fail(rc.code, rc.msg);
+        }
+        return ResultT<Endpoint>::success(endpoint);
     }
 
     Result Client::send_client_hello() {
@@ -707,6 +799,8 @@ namespace scn {
             if (_send_budget_bytes < static_cast<U64>(pending.len)) {
                 ++_stats.send_budget_throttles;
                 ++_stats.backpressure_events;
+                _congestion.on_backpressure(now);
+                _send_budget_bytes = (std::min<U64>)(_send_budget_bytes, _congestion.bucket_cap_bytes());
                 refresh_runtime_stats();
                 return Result::success();
             }
@@ -721,6 +815,9 @@ namespace scn {
                 if (rc.code == Errc::WouldBlock) {
                     ++_stats.would_block_events;
                     ++_stats.backpressure_events;
+                    _congestion.on_backpressure(now);
+                    _send_budget_bytes = (std::min<U64>)(_send_budget_bytes, _congestion.bucket_cap_bytes());
+                    refresh_runtime_stats();
                     return Result::success();
                 }
                 ++_stats.socket_errors;
@@ -791,10 +888,27 @@ namespace scn {
             _stats.reliable_retransmits += after_retransmits - before_retransmits;
         }
         if (after_losses > before_losses) {
-            _stats.reliable_loss_events += after_losses - before_losses;
+            const U64 losses = after_losses - before_losses;
+            _stats.reliable_loss_events += losses;
+            _congestion.on_loss(now, losses);
+            _send_budget_bytes = (std::min<U64>)(_send_budget_bytes, _congestion.bucket_cap_bytes());
         }
         refresh_runtime_stats();
         return Result::success();
+    }
+
+    void Client::emit_message(const MsgView& msg) {
+        auto text = _text_handlers.find(msg.type);
+        if (text != _text_handlers.end() && text->second) {
+            text->second(msg.text());
+        }
+        auto binary = _binary_handlers.find(msg.type);
+        if (binary != _binary_handlers.end() && binary->second) {
+            binary->second(msg);
+        }
+        if (_on_message) {
+            _on_message(msg);
+        }
     }
 
     Result Client::deliver_application_message(Channel channel, U8 type, const U8* data, U16 len, U64 delivery_sequence) {
@@ -806,14 +920,12 @@ namespace scn {
             auto rc = _ordered.accept(delivery_sequence, type, data, len,
                                       [&](U8 delivered_type, const U8* delivered_data, U16 delivered_len) {
                                           ++delivered_count;
-                                          if (_on_message) {
-                                              MsgView msg{};
-                                              msg.channel = Channel::ReliableOrdered;
-                                              msg.type = delivered_type;
-                                              msg.data = delivered_data;
-                                              msg.len = delivered_len;
-                                              _on_message(msg);
-                                          }
+                                          MsgView msg{};
+                                          msg.channel = Channel::ReliableOrdered;
+                                          msg.type = delivered_type;
+                                          msg.data = delivered_data;
+                                          msg.len = delivered_len;
+                                          emit_message(msg);
                                           return Result::success();
                                       },
                                       buffered, stale);
@@ -841,25 +953,21 @@ namespace scn {
                 ++_stats.sequenced_messages_dropped;
                 return Result::success();
             }
-            if (_on_message) {
-                MsgView msg{};
-                msg.channel = Channel::SequencedUnreliable;
-                msg.type = type;
-                msg.data = data;
-                msg.len = len;
-                _on_message(msg);
-            }
-            return Result::success();
-        }
-
-        if (_on_message) {
             MsgView msg{};
-            msg.channel = channel;
+            msg.channel = Channel::SequencedUnreliable;
             msg.type = type;
             msg.data = data;
             msg.len = len;
-            _on_message(msg);
+            emit_message(msg);
+            return Result::success();
         }
+
+        MsgView msg{};
+        msg.channel = channel;
+        msg.type = type;
+        msg.data = data;
+        msg.len = len;
+        emit_message(msg);
         return Result::success();
     }
 
@@ -916,9 +1024,11 @@ namespace scn {
                     return;
                 }
                 ReliableSession& session = (ack_channel == Channel::ReliableOrdered) ? _ordered_reliable : _reliable;
-                const ReliableAckEvent ack = session.acknowledge(acked_message_id, now_ms());
+                const U64 ack_now = now_ms();
+                const ReliableAckEvent ack = session.acknowledge(acked_message_id, ack_now);
                 if (ack.removed) {
                     ++_stats.reliable_acks_received;
+                    _congestion.on_ack(ack.rtt_sample_valid, ack.rtt_sample_ms, ack.retransmitted, ack_now);
                 }
                 refresh_runtime_stats();
                 return;

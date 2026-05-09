@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libsodium-dev
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DSECURECNET_BUILD_DEMO=OFF \
+            -DSECURECNET_BUILD_TESTS=ON \
+            -DSECURECNET_BUILD_EXAMPLES=ON \
+            -DSECURECNET_BUILD_BENCHMARKS=ON \
+            -DSECURECNET_BUILD_DOC_SNIPPETS=ON \
+            -DSECURECNET_WARNINGS_AS_ERRORS=ON
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

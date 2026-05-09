@@ -2,8 +2,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 #include "securecnet/bytebuf.hpp"
 #include "securecnet/config.hpp"
@@ -25,6 +27,55 @@ namespace scn {
         U64 lifetime_ms{ 0 };
     };
 
+    struct BackpressureInfo {
+        Errc code{ Errc::Ok };
+        Channel channel{ Channel::Unreliable };
+        U8 type{ 0 };
+        ST queued_packets{ 0 };
+        ST queued_bytes{ 0 };
+        U64 send_budget_bytes{ 0 };
+    };
+
+    template <class T>
+    constexpr bool binary_message_type_supported_v =
+        std::is_trivially_copyable_v<T> &&
+        std::is_default_constructible_v<T> &&
+        !std::is_pointer_v<T>;
+
+    template <class T>
+    std::span<const U8> bytes_of(const T& value) {
+        static_assert(binary_message_type_supported_v<T>,
+                      "scn::bytes_of requires a trivially copyable, default constructible non-pointer type");
+        return std::span<const U8>(reinterpret_cast<const U8*>(&value), sizeof(T));
+    }
+
+    constexpr ST max_inline_payload_size(Channel channel) {
+        switch (channel) {
+        case Channel::Reliable:
+            return NetConfig::MaxReliableMessageBytes;
+        case Channel::ReliableOrdered:
+            return NetConfig::MaxOrderedMessageBytes;
+        case Channel::SequencedUnreliable:
+            return NetConfig::MaxSequencedMessageBytes;
+        case Channel::Unreliable:
+        case Channel::Control:
+        default:
+            return NetConfig::MaxMessageBytes;
+        }
+    }
+
+    template <class T>
+    constexpr bool fits_inline(Channel channel) {
+        static_assert(binary_message_type_supported_v<T>,
+                      "fits_inline requires a trivially copyable, default constructible non-pointer type");
+        return sizeof(T) <= max_inline_payload_size(channel);
+    }
+
+    template <class T> constexpr bool fits_unreliable() { return fits_inline<T>(Channel::Unreliable); }
+    template <class T> constexpr bool fits_reliable() { return fits_inline<T>(Channel::Reliable); }
+    template <class T> constexpr bool fits_ordered() { return fits_inline<T>(Channel::ReliableOrdered); }
+    template <class T> constexpr bool fits_latest() { return fits_inline<T>(Channel::SequencedUnreliable); }
+
     struct MsgView {
         Channel channel{};
         U8 type{ 0 };
@@ -36,6 +87,34 @@ namespace scn {
                 return {};
             }
             return std::span<const U8>(data, len);
+        }
+
+        std::span<const U8> u8span() const {
+            return bytes();
+        }
+
+        std::span<const std::byte> byte_span() const {
+            if (!data || len == 0) {
+                return {};
+            }
+            return std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), len);
+        }
+
+        template <class T>
+        ResultT<T> as() const {
+            static_assert(binary_message_type_supported_v<T>,
+                          "MsgView::as requires a trivially copyable, default constructible non-pointer type");
+            if (len != sizeof(T)) {
+                return ResultT<T>::fail(Errc::BadPacket, "binary message size mismatch");
+            }
+            if (len > 0 && !data) {
+                return ResultT<T>::fail(Errc::BadPacket, "binary message data is null");
+            }
+            T value{};
+            if constexpr (sizeof(T) > 0) {
+                std::memcpy(&value, data, sizeof(T));
+            }
+            return ResultT<T>::success(value);
         }
 
         std::string_view text() const {
@@ -71,18 +150,7 @@ namespace scn {
     }
 
     constexpr U16 max_inline_payload_for_channel(Channel channel) {
-        switch (channel) {
-        case Channel::Reliable:
-            return static_cast<U16>(NetConfig::MaxReliableMessageBytes);
-        case Channel::ReliableOrdered:
-            return static_cast<U16>(NetConfig::MaxOrderedMessageBytes);
-        case Channel::SequencedUnreliable:
-            return static_cast<U16>(NetConfig::MaxSequencedMessageBytes);
-        case Channel::Unreliable:
-        case Channel::Control:
-        default:
-            return static_cast<U16>(NetConfig::MaxMessageBytes);
-        }
+        return static_cast<U16>(max_inline_payload_size(channel));
     }
 
     // Writes: [ch][type][len][bytes]

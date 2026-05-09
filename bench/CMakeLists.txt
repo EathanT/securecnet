@@ -4,6 +4,7 @@ set(SECURECNET_BENCH_TARGETS
   bench_fragmented_transfer
   bench_allocation_profile
   bench_async_io_context
+  bench_router_dispatch
 )
 
 add_executable(bench_packet_encode_decode bench_packet_encode_decode.cpp)
@@ -11,6 +12,7 @@ add_executable(bench_reliable_loss bench_reliable_loss.cpp)
 add_executable(bench_fragmented_transfer bench_fragmented_transfer.cpp)
 add_executable(bench_allocation_profile bench_allocation_profile.cpp)
 add_executable(bench_async_io_context bench_async_io_context.cpp)
+add_executable(bench_router_dispatch bench_router_dispatch.cpp)
 
 foreach(target IN LISTS SECURECNET_BENCH_TARGETS)
   target_link_libraries(${target} PRIVATE securecnet::securecnet)

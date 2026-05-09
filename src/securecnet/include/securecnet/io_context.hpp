@@ -7,8 +7,10 @@
 #include <deque>
 #include <functional>
 #include <future>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -16,6 +18,12 @@
 
 
 namespace scn {
+
+	struct IoContextConfig {
+		// 0 means unbounded. The default keeps the async queue aligned with the
+		// library's bounded-growth design while remaining generous for normal apps.
+		ST max_posted_callbacks{ 65536 };
+	};
 	
 	class IoContextService {
 	public:
@@ -26,23 +34,42 @@ namespace scn {
 	class IoContext {
 	public:
 		IoContext() = default;
+		explicit IoContext(const IoContextConfig& config) : _config(config) {}
 		~IoContext();
 
 		IoContext(const IoContext&) = delete;
 		IoContext& operator=(const IoContext&) = delete;
 
 		Result runtime_status() const { return _runtime.status(); }
+		const IoContextConfig& config() const { return _config; }
+		ST posted_count() const;
 
 		void post(std::function<void()> fn);
+		Result try_post(std::function<void()> fn);
 
 		template <class Fn>
 		auto post_task(Fn&& fn) -> std::future<std::invoke_result_t<std::decay_t<Fn>&>> {
 			using Task = std::decay_t<Fn>;
 			using Return = std::invoke_result_t<Task&>;
 
-			auto packaged = std::make_shared<std::packaged_task<Return()>>(Task(std::forward<Fn>(fn)));
-			auto future = packaged->get_future();
-			post([packaged]() mutable { (*packaged)(); });
+			auto task = std::make_shared<Task>(std::forward<Fn>(fn));
+			auto promise = std::make_shared<std::promise<Return>>();
+			auto future = promise->get_future();
+			auto rc = try_post([task, promise]() mutable {
+				try {
+					if constexpr (std::is_void_v<Return>) {
+						std::invoke(*task);
+						promise->set_value();
+					} else {
+						promise->set_value(std::invoke(*task));
+					}
+				} catch (...) {
+					promise->set_exception(std::current_exception());
+				}
+			});
+			if (!rc.ok()) {
+				promise->set_exception(std::make_exception_ptr(std::runtime_error("IoContext post_task failed")));
+			}
 			return future;
 		}
 
@@ -116,6 +143,7 @@ namespace scn {
 		void unregister_service(IoContextService* service);
 		Result drain_posted();
 
+		IoContextConfig _config{};
 		SocketInit _runtime{};
 		std::vector<IoContextService*> _services{};
 		std::deque<std::function<void()>> _posted{};

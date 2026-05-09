@@ -22,6 +22,9 @@ add_executable(scn_tests
   test_fuzz.cpp
   test_validation_hardening.cpp
   test_async.cpp
+  test_api_ergonomics.cpp
+  test_app_helpers.cpp
+  test_router_request_reply.cpp
 )
 
 target_link_libraries(scn_tests PRIVATE securecnet::securecnet)
